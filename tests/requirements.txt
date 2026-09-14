@@ -1,0 +1,5 @@
+# Extra dependencies for the frontend/end-to-end tests only (on top of
+# backend/requirements.txt, which these also need since the e2e tests
+# start a real copy of the backend as a subprocess).
+playwright>=1.45,<2.0
+pytest-playwright>=0.5,<1.0

@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: Snake Arena API
+  description: >
+    Backend contract for the Snake Arena class project. The frontend runs
+    the game entirely client-side and only calls this API to submit a
+    finished run's score and to read the leaderboard. See
+    product-spec.md for full context and rationale.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Confirms the API (and its database connection) is up.
+      tags: [health]
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+              example:
+                status: ok
+
+  /api/scores:
+    post:
+      operationId: createScore
+      summary: Submit a completed run's score
+      description: >
+        Called once by the frontend when a game ends. The server assigns
+        the id and created_at timestamp; the client never sets these.
+      tags: [scores]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScoreCreate"
+            example:
+              player_name: Donna
+              score: 17
+      responses:
+        "201":
+          description: Score stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Score"
+              example:
+                id: 42
+                player_name: Donna
+                score: 17
+                created_at: "2026-09-13T21:30:00Z"
+        "422":
+          description: Validation error (e.g. empty name, negative score)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+
+    get:
+      operationId: listTopScores
+      summary: Get the leaderboard
+      description: >
+        Returns the top scores, highest first. Ties are broken by earlier
+        submission (lower id first).
+      tags: [scores]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of scores to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: Top scores, highest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Score"
+              example:
+                - id: 42
+                  player_name: Donna
+                  score: 17
+                  created_at: "2026-09-13T21:30:00Z"
+                - id: 41
+                  player_name: Russ
+                  score: 12
+                  created_at: "2026-09-13T20:05:00Z"
+        "422":
+          description: Invalid query parameter (e.g. limit out of range)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ScoreCreate:
+      type: object
+      required: [player_name, score]
+      properties:
+        player_name:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Trimmed before validation; 1-20 characters.
+        score:
+          type: integer
+          minimum: 0
+
+    Score:
+      type: object
+      required: [id, player_name, score, created_at]
+      properties:
+        id:
+          type: integer
+        player_name:
+          type: string
+          minLength: 1
+          maxLength: 20
+        score:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+          description: Server-assigned UTC timestamp.
+
+    ValidationError:
+      type: object
+      description: FastAPI's default validation error shape.
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items:
+                  type: string
+              msg:
+                type: string
+              type:
+                type: string
