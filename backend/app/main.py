@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -43,3 +46,15 @@ def read_leaderboard(
     db: Session = Depends(get_db),
 ):
     return crud.get_top_scores(db, limit=limit)
+
+
+# Serve the built frontend, if present. In local dev the frontend is
+# served separately (see README.md) and this directory doesn't exist, so
+# nothing here changes -- this only activates inside the Docker image,
+# which copies the frontend's static files to backend/static (see
+# Dockerfile). Mounted last, and at "/", so it never shadows the /api
+# routes above: FastAPI matches routes in the order they were declared,
+# and only falls through to this catch-all mount for anything else.
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="frontend")

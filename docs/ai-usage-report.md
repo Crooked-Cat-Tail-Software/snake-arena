@@ -214,3 +214,67 @@ again" returning to the start screen.
   internet access.
 
 **Human review:** approved ("looks good").
+
+## Stage 6 — Dockerfile (Node build stage + Python backend serving the frontend)
+
+**Asked for:** a Dockerfile that builds the frontend with Node, then
+builds a Python image containing the backend and the frontend's static
+files, with the backend serving the frontend.
+
+**Clarified first:** the frontend has no build tooling (no
+`package.json`, no bundler) — nothing for a Node stage to actually
+compile. Asked how to handle that rather than guessing; the choice made
+was a no-op Node stage (just stages the files through, ready for a real
+build step later without other changes).
+
+**AI produced:**
+- `Dockerfile` — a two-stage build. Stage 1 (`node:20-alpine`) stages
+  `frontend/` unchanged (commented with what a real `npm run build` step
+  would look like, for later). Stage 2 (`python:3.11-slim`) installs
+  backend dependencies, copies the backend app code, copies the staged
+  frontend from stage 1 into `backend/static`, creates a data directory,
+  sets `DATABASE_URL` to an absolute-path SQLite URL, declares a volume
+  at `/app/data` for persistence, and runs `uvicorn` on port 8000.
+- `.dockerignore` — keeps dev-only artifacts (`.venv`, `__pycache__`,
+  `tests/`, `docs/`, the real `backend/data/`) out of the build context.
+- `backend/app/main.py` — added a static-files mount: if `backend/static`
+  exists, it's mounted at `"/"` (after the `/api/*` routes are declared,
+  so they still take priority) so the backend serves the game itself, not
+  only JSON. Guarded on the directory existing, so local dev (where that
+  directory never exists) is completely unaffected — the separate
+  frontend/backend dev servers documented in README.md still work exactly
+  as before.
+- `README.md` / `AGENTS.md` — added `docker build`/`docker run`
+  instructions, and a note that changing the published host port requires
+  updating `frontend/config.js` (it calls an absolute URL, not a relative
+  one, so it must match wherever the container is actually reached).
+
+**Verification actually performed, and its real limit:**
+- Could not run `docker build` itself in this environment — its network
+  doesn't allow reaching Docker Hub to pull the `node`/`python` base
+  images (confirmed via the proxy explicitly rejecting the connection,
+  not just a timeout).
+- To verify the part that actually carries risk — the application code,
+  not the Dockerfile's copy/install steps — reproduced the image's
+  effective steps directly: installed `backend/requirements.txt` into a
+  fresh venv, copied `frontend/` to `backend/static` (what
+  `COPY --from=frontend` does), set `DATABASE_URL` to the same
+  absolute-path SQLite URL format the image sets, and ran the same
+  `uvicorn app.main:app --host 0.0.0.0 --port 8000` command the image
+  runs.
+- Confirmed via curl: `/` serves `index.html`, `/app.js` and `/style.css`
+  serve with correct content types (not swallowed by the API routes),
+  `/api/health`, `/api/scores` (POST and GET) all still work correctly
+  from the same server.
+- Confirmed via a real headless browser: loaded `http://localhost:8000/`
+  (the single combined origin), played a full game, submitted a score,
+  saw it appear on the leaderboard, and checked for console errors —
+  none. This is the actual end-to-end behavior "backend serves frontend"
+  promises, verified for real, just not through `docker build` itself.
+- What's NOT verified: the Dockerfile's own build mechanics (does it
+  build cleanly, are the base images/layer order sensible, does the
+  final image run correctly as a container). This needs `docker build -t
+  snake-arena .` run once on a machine with normal internet access —
+  worth doing before considering this deliverable done.
+
+**Human review:** approved ("looks good").

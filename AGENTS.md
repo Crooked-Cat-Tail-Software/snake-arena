@@ -18,8 +18,11 @@ snake-arena/
 ├── product-spec.md         # Product spec — read this first
 ├── AGENTS.md                # This file
 ├── openapi.yaml             # THE contract — source of truth for the API
+├── Dockerfile                # Node (frontend, no-op today) + Python (backend, serves it)
+├── .dockerignore
 ├── frontend/                 # Vanilla HTML/CSS/JS, no build step
 ├── backend/                  # Python/FastAPI, SQLite persistence
+│   └── app/main.py           # Mounts backend/static (built frontend) at "/" if present
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
 └── docs/
     └── ai-usage-report.md    # Log of how AI was used across this project
@@ -113,3 +116,9 @@ Tests should be run — and pass — before any change is considered done.
       bugs found during manual review.
 - [x] `docs/ai-usage-report.md` — living log, updated after each stage
 - [x] `README.md` — run/test instructions for the backend
+- [x] `Dockerfile` — builds frontend (Node, currently a no-op copy — no
+      build tooling exists yet) + backend (Python) into one image; the
+      backend serves the frontend itself. Application behavior verified
+      by reproducing the image's steps directly; `docker build` itself
+      not run in this environment (no Docker Hub access) — run it once
+      yourself to confirm.
