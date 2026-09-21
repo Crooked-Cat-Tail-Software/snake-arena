@@ -6,6 +6,13 @@ FastAPI's TestClient. Playwright needs an actual running server to point
 a real browser at, so this starts real `uvicorn` and
 `python -m http.server` processes as subprocesses.
 
+The frontend is a Vite/React app (frontend/), not static files we can
+copy and text-patch, so this fixture runs the real `npm ci && npm run
+build` -- with VITE_API_BASE_URL pointed at this session's backend port
+-- and serves the resulting dist/ folder. That means this suite exercises
+the same build a real `npm run build` or `docker build` produces, not a
+stand-in for it. Requires Node/npm to be installed (see README.md).
+
 Fully isolated from anything you might be running yourself:
 - its own free ports (chosen dynamically, not 8000/5500), and
 - its own temporary SQLite file,
@@ -48,6 +55,14 @@ def _wait_until_up(url: str, timeout: float = 20.0) -> None:
     raise RuntimeError(f"{url} did not become reachable in time: {last_error}")
 
 
+def _npm_install_command() -> list[str]:
+    # `npm ci` needs an existing lockfile and is the reproducible choice;
+    # fall back to `npm install` if someone runs this before one exists.
+    if (FRONTEND_DIR / "package-lock.json").exists():
+        return ["npm", "ci"]
+    return ["npm", "install"]
+
+
 @pytest.fixture(scope="session")
 def app_urls(tmp_path_factory):
     tmp_dir = tmp_path_factory.mktemp("frontend-e2e")
@@ -67,15 +82,42 @@ def app_urls(tmp_path_factory):
         stderr=subprocess.STDOUT,
     )
 
-    # --- a copy of the frontend, pointed at that backend's port ---
-    frontend_copy = tmp_dir / "frontend"
-    shutil.copytree(FRONTEND_DIR, frontend_copy)
-    (frontend_copy / "config.js").write_text(
-        f'export const API_BASE_URL = "http://localhost:{backend_port}";\n'
-    )
+    # --- a real production build of the frontend, pointed at that
+    # backend's port via a build-time env var (see frontend/src/config.js
+    # and frontend/.env.example) ---
+    build_env = os.environ.copy()
+    build_env["VITE_API_BASE_URL"] = f"http://localhost:{backend_port}"
+    dist_dir = FRONTEND_DIR / "dist"
+    try:
+        subprocess.run(
+            _npm_install_command(),
+            cwd=FRONTEND_DIR,
+            env=build_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["npm", "run", "build"],
+            cwd=FRONTEND_DIR,
+            env=build_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        backend_proc.terminate()
+        raise RuntimeError(
+            f"frontend build failed ({' '.join(exc.cmd)}):\n{exc.stdout}\n{exc.stderr}"
+        ) from exc
+
+    if not dist_dir.is_dir():
+        backend_proc.terminate()
+        raise RuntimeError(f"expected build output at {dist_dir}, but it doesn't exist")
+
     frontend_proc = subprocess.Popen(
         [sys.executable, "-m", "http.server", str(frontend_port)],
-        cwd=frontend_copy,
+        cwd=dist_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -98,6 +140,9 @@ def app_urls(tmp_path_factory):
             frontend_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             frontend_proc.kill()
+        # dist/ is a build artifact (frontend/.gitignore excludes it) --
+        # clean it up so repeated test runs always rebuild fresh.
+        shutil.rmtree(dist_dir, ignore_errors=True)
 
 
 @pytest.fixture()

@@ -277,4 +277,83 @@ build step later without other changes).
   snake-arena .` run once on a machine with normal internet access —
   worth doing before considering this deliverable done.
 
+## Stage 7 — Convert the frontend to React
+
+**Asked for:** convert the frontend to React, because the class assignment
+requires Node.js (the request noted vanilla HTML/JS is cleaner, but the
+assignment's requirement takes priority).
+
+**AI produced:**
+- `frontend/` rebuilt as a React app scaffolded with Vite:
+  `package.json`/`package-lock.json`, `vite.config.js`, `index.html`,
+  `.env.example`, `.gitignore` (`node_modules/`, `dist/`, `.env*`).
+- `frontend/src/game.js` — the `SnakeGame` class carried over **unchanged**
+  from the vanilla version. It was already a plain, framework-agnostic
+  class operating on a canvas element via callbacks, so nothing about the
+  actual game logic (movement, collision, scoring) needed to change.
+- `frontend/src/api.js` — the API client, ported with no behavior changes.
+- `frontend/src/config.js` — `API_BASE_URL` now reads
+  `import.meta.env.VITE_API_BASE_URL` (Vite's build-time env var
+  mechanism) with the same `http://localhost:8000` default as before, so
+  local dev is unchanged; see `.env.example` for how to override it.
+- `frontend/src/App.jsx` plus `components/StartScreen.jsx`,
+  `GameOverScreen.jsx`, `Leaderboard.jsx` — React function components with
+  hooks (`useState`/`useEffect`/`useRef`/`useCallback`) replacing the old
+  imperative DOM-manipulation code in `app.js`. All existing element ids
+  and classes (`#player-name`, `#start-button`, `#game-canvas`,
+  `#leaderboard-list`, etc.) were kept exactly, so the existing
+  `style.css` and the existing frontend test suite needed no changes.
+  Both previously-fixed bugs were carried forward deliberately: the CSS
+  width fix (unchanged `style.css`) and the WASD-in-textbox guard, now a
+  check inside the `keydown` `useEffect` (`if target is INPUT/TEXTAREA/
+  contentEditable, return before treating the key as a movement key`).
+- `Dockerfile` — the Node stage is now a real build instead of a no-op:
+  `npm ci` (using the checked-in lockfile), then `npm run build` with
+  `VITE_API_BASE_URL=""` so the production bundle calls the API on its
+  own origin (relative URLs) rather than a hardcoded host — this also
+  removes the old caveat that changing the container's published port
+  required editing a source file. The backend stage now copies
+  `frontend/dist` (the build output) into `backend/static`, instead of
+  the raw `frontend/` directory.
+- `tests/frontend/conftest.py` — rewritten so the `app_urls` fixture runs
+  the real `npm ci && npm run build` (pointed at that test session's
+  throwaway backend port via `VITE_API_BASE_URL`) and serves the built
+  `dist/` directory, instead of copying static files and text-patching a
+  `config.js`. `tests/frontend/test_frontend.py` itself needed **no
+  changes** — same ids, same behavior.
+- `product-spec.md`, `AGENTS.md`, `README.md` — tech stack, repo layout,
+  setup/run/test instructions, and the Docker port-change note all
+  updated for React/Vite/Node (see those files' git history for exact
+  diffs); Node.js added as a project requirement alongside Python/uv.
+
+**Verification actually performed:**
+- `npm install` (19 packages, 0 vulnerabilities) and `npm run build`
+  completed cleanly, producing a small production bundle (~225KB JS,
+  ~1.4KB CSS).
+- Ran the pre-existing vanilla-frontend Playwright playtest script
+  against the React build with **no changes to the script itself**: full
+  game start-to-finish, score submission, leaderboard update, zero
+  console errors, zero failed network requests. Same result running the
+  full stack through the backend's static-file mount (the same
+  same-origin, `VITE_API_BASE_URL=""` setup Docker uses) rather than a
+  separate dev server.
+- Specifically re-checked both previously-fixed bugs against the React
+  port with real, key-by-key Playwright input (not the less realistic
+  batch `type()` action): the name input measured 439px wide (well over
+  the 250px regression threshold), and typing "donna" character-by-
+  character produced the correct value with no character loss.
+- Ran the actual project test suite unmodified — `pytest tests -v` — and
+  got **15/15 passing**: the 9 backend tests untouched by this change,
+  plus all 6 frontend/e2e tests now running against the real React build
+  via the rewritten `conftest.py`.
+- Same limitation as Stage 6: `docker build` itself was not run in this
+  environment (no Docker Hub access), so the Dockerfile's own build
+  mechanics are unverified here — worth running once on a machine with
+  normal internet access. Everything the Dockerfile's Node stage actually
+  does (`npm ci && npm run build` with that exact env var, then serving
+  the result from the backend) was verified by reproducing those steps
+  directly, as in Stage 6.
+
+**Human review:** pending — this stage's files are ready for review.
+
 **Human review:** approved ("looks good").

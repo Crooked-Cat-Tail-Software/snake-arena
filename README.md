@@ -14,16 +14,18 @@ backend → frontend → tests, with a human review checkpoint after each.
 - [x] Product spec
 - [x] API contract (`openapi.yaml`)
 - [x] Backend (FastAPI + SQLite), with a passing test suite
-- [x] Frontend (vanilla HTML5 canvas + JS), played end-to-end in a real
-      headless browser as part of verification
+- [x] Frontend (React + Vite, HTML5 canvas for the game), played
+      end-to-end in a real headless browser as part of verification
 - [x] Frontend/end-to-end test suite (Playwright), covering both bugs
       found during manual review as regression tests
-- [x] Dockerfile — single container serves both the API and the frontend
+- [x] Dockerfile — single container serves both the API and the frontend,
+      building the frontend for real with Node/npm
 
 ## Requirements
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) for environment/dependency management
+- Node.js 20+ and npm, for the frontend (React, built with Vite)
 
 ## Run the backend
 
@@ -64,6 +66,10 @@ uv run playwright install chromium
 
 (`playwright install chromium` downloads a browser for the tests to
 drive — a few hundred MB, one-time, only needed for the frontend tests.)
+Node/npm (see Requirements above) must also be installed — the frontend
+tests build the real app as part of the test run (`npm ci && npm run
+build`), the same build the Dockerfile and `npm run build` produce by
+hand.
 
 Then, from `backend/`:
 
@@ -89,28 +95,39 @@ All 15 tests should pass:
 
 ## Run the frontend
 
-No build step — just serve the static files (opening `index.html`
-directly with `file://` won't work because it uses ES modules, which
-browsers block over `file://`):
+Install dependencies once, then start Vite's dev server:
 
 ```bash
 cd frontend
-python3 -m http.server 5500
+npm install
+npm run dev
 ```
 
-Then open `http://localhost:5500` in a browser, with the backend already
-running (see above) at `http://localhost:8000`. Enter a name, press
-"Start game", and use the arrow keys or WASD to play. On game over your
-score is submitted automatically and the leaderboard refreshes.
+Then open the URL Vite prints (`http://localhost:5500` by default), with
+the backend already running (see above) at `http://localhost:8000`. Enter
+a name, press "Start game", and use the arrow keys or WASD to play. On
+game over your score is submitted automatically and the leaderboard
+refreshes.
 
 If you serve the frontend from a different port, no changes are needed —
 the backend allows any localhost origin. If you move the backend to a
-different port, update `API_BASE_URL` in `frontend/config.js`.
+different port, set `VITE_API_BASE_URL` (see `frontend/.env.example`) to
+match before starting `npm run dev`, instead of editing code.
+
+For a production build (static files, no dev server) — this is what the
+Dockerfile also runs:
+
+```bash
+npm run build
+```
+
+This writes to `frontend/dist/`, which you can serve with any static file
+server.
 
 ## Run it in Docker (one container, no separate frontend server)
 
-The `Dockerfile` builds the frontend (a no-op today — see the comments in
-the file for why) and the backend into one image; the backend serves the
+The `Dockerfile` builds the frontend for real (Node: `npm ci && npm run
+build`) and the backend into one image; the backend serves the built
 frontend itself, so there's only one thing to run and one port to visit.
 
 ```bash
@@ -123,19 +140,21 @@ API. The `-v snake-arena-data:/app/data` volume keeps your SQLite data
 across container restarts/rebuilds; drop it if you want a clean
 leaderboard every time instead.
 
-If you map to a host port other than 8000 (e.g. `-p 9000:8000`), update
-`API_BASE_URL` in `frontend/config.js` to match before building, the same
-as you would for a non-Docker port change — the frontend calls that exact
-URL for every API request.
+Unlike the old vanilla frontend, no code edit is needed if you map to a
+different host port (e.g. `-p 9000:8000`): the Dockerfile builds the
+frontend with `VITE_API_BASE_URL=""`, so the built app calls the API on
+its own origin (same host and port the page was loaded from) instead of
+a hardcoded URL — it works at whatever port you map to it.
 
 Note on verification: I confirmed the actual application behavior this
-enables (the backend serving the frontend at `/`, static files, the API
-routes, and the absolute-path SQLite URL format) by reproducing those
-exact steps directly — installing the same dependencies, copying the
-frontend into `backend/static`, and running the same `uvicorn` command
-the image runs — and drove it with a real browser end-to-end (play a
-game, submit a score, see it on the leaderboard) with no console errors.
-I was not able to run `docker build` itself in my sandbox (its network
-doesn't allow reaching Docker Hub for the base images), so that exact
-command is worth running once yourself before you rely on it — see
-`docs/ai-usage-report.md` for the full story.
+enables (the backend serving the built frontend at `/`, static files, the
+API routes, and the absolute-path SQLite URL format) by reproducing those
+exact steps directly — installing the same dependencies, running the same
+`npm ci && npm run build` the image runs, copying `frontend/dist` into
+`backend/static`, and running the same `uvicorn` command the image runs —
+and drove it with a real browser end-to-end (play a game, submit a score,
+see it on the leaderboard) with no console errors. I was not able to run
+`docker build` itself in my sandbox (its network doesn't allow reaching
+Docker Hub for the base images), so that exact command is worth running
+once yourself before you rely on it — see `docs/ai-usage-report.md` for
+the full story.

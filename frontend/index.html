@@ -1,47 +1,13 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Snake Arena</title>
-<link rel="stylesheet" href="style.css" />
-<link rel="icon" href="data:,">
-</head>
-<body>
-  <div class="app">
-    <h1>Snake Arena</h1>
-
-    <div class="layout">
-      <div class="game-column">
-        <div id="start-screen" class="panel">
-          <label for="player-name">Your name</label>
-          <input id="player-name" maxlength="20" placeholder="e.g. Donna" autocomplete="off" />
-          <button id="start-button">Start game</button>
-          <p class="hint">Arrow keys or WASD to move. Eat the red food, avoid walls and yourself.</p>
-        </div>
-
-        <div id="hud" class="hud hidden">
-          <span>Score: <strong id="current-score">0</strong></span>
-        </div>
-
-        <canvas id="game-canvas" width="400" height="400" tabindex="0" class="hidden"></canvas>
-
-        <div id="game-over-screen" class="panel hidden">
-          <h2>Game over</h2>
-          <p>Final score: <strong id="final-score">0</strong></p>
-          <p id="submit-status" class="status"></p>
-          <button id="play-again-button">Play again</button>
-        </div>
-      </div>
-
-      <div class="leaderboard-column panel">
-        <h2>Leaderboard</h2>
-        <ol id="leaderboard-list"></ol>
-        <p id="leaderboard-status" class="status"></p>
-      </div>
-    </div>
-  </div>
-
-  <script type="module" src="app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snake Arena</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>

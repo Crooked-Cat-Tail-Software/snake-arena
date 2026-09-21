@@ -106,7 +106,7 @@ run on different localhost ports).
 +----------------+        HTTP/JSON, per OpenAPI contract        +----------------+        SQLite (file)
 |   Frontend     |  <--------------------------------------->    |    Backend     |  <----------------->  scores.db
 | HTML5 canvas   |   POST /api/scores                            |   FastAPI      |
-| + vanilla JS   |   GET  /api/scores                             |   Python       |
+| + React (Vite) |   GET  /api/scores                             |   Python       |
 | (game loop     |   GET  /api/health                            |                |
 |  runs locally) |                                                |                |
 +----------------+                                                +----------------+
@@ -120,10 +120,18 @@ score, never frame-by-frame state.
 
 - Backend: Python, FastAPI (generates/validates against the OpenAPI
   contract), SQLite via SQLAlchemy, run with `uv`.
-- Frontend: vanilla HTML/CSS/JS, `<canvas>` for rendering, no build step —
-  open `index.html` or serve it with a trivial static server.
-- Tests: `pytest` for backend unit + API contract tests; a short manual/
-  scripted check for frontend behavior (see testing plan in a later step).
+- Frontend: React (via Vite), `<canvas>` for rendering the game itself —
+  built with Node/npm (`npm run build`), served either by Vite's dev
+  server locally or, in Docker, by the backend from the built `dist/`
+  output. The game loop (the `SnakeGame` class) is plain JS, framework-
+  agnostic, and unchanged from the original vanilla implementation; React
+  wraps it for the UI (start/game-over screens, leaderboard, HUD).
+  Originally built as vanilla HTML/CSS/JS with no build step; converted to
+  React/Vite per the class assignment's Node.js requirement (see
+  `docs/ai-usage-report.md` for that stage).
+- Tests: `pytest` for backend unit + API contract tests; Playwright
+  end-to-end tests drive a real browser against the built frontend and a
+  real backend (see `tests/`).
 
 ## 10. Acceptance criteria / definition of done for v1
 
