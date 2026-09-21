@@ -1,0 +1,13 @@
+# Keep the build context (and image) small and free of dev-only artifacts.
+**/__pycache__/
+**/*.pyc
+backend/.venv/
+backend/.pytest_cache/
+backend/data/
+.pytest_cache/
+tests/
+docs/
+.git/
+.gitignore
+*.md
+node_modules/
