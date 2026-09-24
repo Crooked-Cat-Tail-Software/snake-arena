@@ -1,0 +1,49 @@
+# Runs the whole app locally: a Postgres database plus the backend (which
+# also serves the built frontend -- see Dockerfile). `docker compose up`
+# is the easiest way to try Postgres without installing it yourself.
+#
+#   docker compose up --build       # first run, or after code changes
+#   docker compose up -d db         # just the database (e.g. to run the
+#                                    # test suite against it from the host)
+#
+# Then open http://localhost:8000 for the app itself.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: snake_arena
+      POSTGRES_PASSWORD: snake_arena
+      POSTGRES_DB: snake_arena
+    ports:
+      # Published to the host so `pytest` (run directly on your machine,
+      # not in a container) can reach this same database -- see
+      # tests/conftest.py and README.md. If something else on your
+      # machine is already using 5432, change the left side here (and the
+      # matching defaults in backend/app/database.py and
+      # tests/conftest.py / tests/frontend/conftest.py) to a free port.
+      - "5432:5432"
+    volumes:
+      - snake-arena-db-data:/var/lib/postgresql/data
+      # Creates the separate snake_arena_test database on first startup
+      # (only runs against a fresh, empty data volume -- see the file).
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snake_arena -d snake_arena"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://snake_arena:snake_arena@db:5432/snake_arena
+
+volumes:
+  # Persists Postgres data across `docker compose down`/`up` cycles. Use
+  # `docker compose down -v` if you want a clean leaderboard instead.
+  snake-arena-db-data:
