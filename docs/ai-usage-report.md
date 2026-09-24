@@ -277,6 +277,8 @@ build step later without other changes).
   snake-arena .` run once on a machine with normal internet access —
   worth doing before considering this deliverable done.
 
+**Human review:** approved ("looks good").
+
 ## Stage 7 — Convert the frontend to React
 
 **Asked for:** convert the frontend to React, because the class assignment
@@ -354,6 +356,146 @@ assignment's requirement takes priority).
   the result from the backend) was verified by reproducing those steps
   directly, as in Stage 6.
 
+**Human review:** approved implicitly — no changes requested to the React
+conversion itself; the next request (Postgres, Stage 8 below) builds
+directly on top of it.
+
+## Stage 8 — Add Postgres support to the backend
+
+**Asked for:** add Postgres support to the backend. Clarified scope
+before touching code (three questions, since each changes what gets
+built): (1) replace SQLite entirely or support both — answer: **replace
+entirely**; (2) add a docker-compose.yml to run Postgres automatically —
+answer: **yes**; (3) should the automated test suite also run against
+Postgres, or stay on SQLite for speed — answer: **also run tests against
+Postgres**.
+
+**AI produced:**
+- `backend/app/database.py` — rewritten. Default `DATABASE_URL` is now a
+  Postgres URL (`postgresql://snake_arena:snake_arena@localhost:5432/
+  snake_arena`, matching what `docker-compose.yml` sets up) instead of a
+  SQLite file path; removed the SQLite-only `connect_args`. No other
+  backend file needed changes — `models.py`, `schemas.py`, `crud.py`, and
+  the health check in `main.py` were already plain SQLAlchemy/Pydantic
+  with nothing SQLite-specific in them.
+- `backend/requirements.txt` — added `psycopg2-binary` (the Postgres
+  driver SQLAlchemy needs).
+- `backend/.gitignore` — removed the now-meaningless `data/*.db` line.
+- `docker-compose.yml` (new, repo root) — a `db` service (`postgres:16-
+  alpine`, named volume for persistence, a healthcheck so the backend
+  waits for it to actually be ready) and a `backend` service (built from
+  the existing `Dockerfile`, `depends_on: db: condition: service_healthy`,
+  `DATABASE_URL` pointed at the `db` service). `docker compose up --build`
+  is the one-command way to run the whole app; `docker compose up -d db`
+  starts just the database, for running the backend or the tests directly
+  against a real Postgres without installing it yourself.
+- `db-init/001-create-test-db.sql` (new) — runs automatically the first
+  time the `db` service's volume is created, creating a second
+  `snake_arena_test` database alongside the main `snake_arena` one, so
+  the automated test suite has its own database and never touches real
+  app data.
+- `Dockerfile` — removed the SQLite-only `ENV DATABASE_URL=sqlite:///...`,
+  `RUN mkdir -p /app/data`, and `VOLUME ["/app/data"]` lines (Postgres
+  persistence now lives in the separate `db` service/volume, not this
+  image); added a `DATABASE_URL` default matching the compose network's
+  `db` hostname, so `docker compose up` needs no extra configuration.
+- `.dockerignore` — removed the now-nonexistent `backend/data/` line.
+- `tests/conftest.py` — rewritten. Instead of a fresh SQLite file created
+  per test, the `client` fixture now connects to a real Postgres database
+  (`snake_arena_test` by default, overridable with `TEST_DATABASE_URL`)
+  and drops + recreates every table before each test runs — a real
+  server can't be spun up fresh per test for free the way a SQLite file
+  could, so this is the isolation mechanism instead. Test files
+  themselves (`test_health.py`, `test_scores.py`) needed **no changes**.
+- `tests/frontend/conftest.py` — the session-scoped `app_urls` fixture
+  now resets that same Postgres test database to empty once, up front,
+  then points the real backend subprocess it starts at it via
+  `DATABASE_URL`, instead of a throwaway SQLite temp file.
+  `test_frontend.py` itself needed **no changes**.
+- `product-spec.md`, `AGENTS.md`, `README.md` — data model/tech
+  stack/architecture diagram, repo layout, and all setup/run/test
+  instructions updated for Postgres + docker-compose; every "backed by
+  SQLite" phrasing replaced, with a note where the change happened for
+  anyone reading the history.
+
+**Verification actually performed:**
+- Installed a real Postgres 16 server (not a stand-in) and created the
+  exact `snake_arena` user/database/password `docker-compose.yml` and
+  `backend/app/database.py`'s default both use, plus the separate
+  `snake_arena_test` database `db-init/001-create-test-db.sql` creates —
+  so what was tested is exactly what `docker compose up -d db` produces,
+  not an approximation of it.
+- Ran the backend against it directly: health check, submitting a score,
+  and reading the leaderboard back all worked correctly over a real
+  Postgres connection (verified via `curl`, not just by reading the code).
+- Ran the same same-origin Docker-simulation playtest used in Stage 6
+  (backend serving the built React frontend from `/`, `VITE_API_BASE_URL
+  =""`) against this Postgres-backed backend: full game, score submitted,
+  leaderboard updated, zero console errors.
+- Ran the actual project test suite, unmodified except for the
+  Postgres-aware `conftest.py` files described above — `pytest tests -v`
+  — and got **15/15 passing**: 9 backend tests and 6 frontend/e2e tests,
+  all now running against a real Postgres database instead of SQLite.
+- Same limitation as Stages 6 and 7: `docker build`/`docker compose up`
+  themselves were not run in this environment (no Docker Hub access), so
+  the Dockerfile's and docker-compose.yml's own build/orchestration
+  mechanics (image layer order, the healthcheck actually gating startup
+  as intended, the init script actually firing on a fresh volume) are
+  unverified here. Everything these files' steps actually *do* once
+  running was verified by reproducing them directly against a real
+  Postgres server, as described above — worth running `docker compose up
+  --build` once yourself before relying on it.
+
 **Human review:** pending — this stage's files are ready for review.
 
-**Human review:** approved ("looks good").
+## Stage 8 follow-up — port 5432 already in use
+
+**Reported:** running `docker compose up` failed with `Bind for
+0.0.0.0:5432 failed: port is already allocated` — something else on the
+machine (commonly a local Postgres install, Postgres.app, or another
+container) was already listening on Postgres's usual port.
+
+**Fix:** changed the `db` service's *host-side* port mapping in
+`docker-compose.yml` from `5432:5432` to `5433:5432`. The container still
+listens on the standard 5432 internally — `backend`'s `DATABASE_URL`
+(`postgresql://...@db:5432/...`) is untouched, since container-to-
+container traffic goes over Docker's internal network, not the published
+host port. Only things connecting from *outside* Docker to this database
+are affected, so their defaults were updated to match:
+`backend/app/database.py`'s `DEFAULT_DATABASE_URL`, and the
+`TEST_DATABASE_URL` default in both `tests/conftest.py` and
+`tests/frontend/conftest.py`. `README.md` and `AGENTS.md` updated to say
+`localhost:5433` instead of `5432` wherever they describe connecting to
+the compose-managed database directly. `DATABASE_URL`/`TEST_DATABASE_URL`
+remain fully overridable for anyone who'd rather free up the real 5432 or
+use a different port entirely.
+
+**Verification actually performed:** proxied a real, already-passing
+Postgres connection onto port 5433 (so it matched the new default port
+exactly, without needing Docker to test the fix) and reran the full
+`pytest tests -v` suite against it with **no environment overrides** —
+15/15 passing, confirming the new default port is actually what the code
+now uses, not just what the comments say.
+
+**Human review:** pending.
+
+## Stage 8 follow-up #2 — reverted to port 5432
+
+**Asked for:** change the host-side port back to 5432 (`lsof -i :5432`
+showed the conflicting process was Docker itself, `com.docker...` — most
+likely a leftover or still-running container from an earlier attempt,
+not a separate Postgres install — so freeing it up was straightforward).
+
+**Fix:** reverted every place the 5433 follow-up touched, back to 5432:
+`docker-compose.yml`'s host-side port mapping, the `DEFAULT_DATABASE_URL`
+in `backend/app/database.py`, the `TEST_DATABASE_URL` default in both
+`tests/conftest.py` and `tests/frontend/conftest.py`, and the port
+mentioned in `README.md`/`AGENTS.md`. Comments in those files now note
+that the port is easy to change again in the same handful of places if
+this ever recurs.
+
+**Verification actually performed:** ran the full `pytest tests -v` suite
+again with no environment overrides, against a real local Postgres server
+on the standard port 5432 — 15/15 passing.
+
+**Human review:** pending.

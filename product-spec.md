@@ -25,7 +25,8 @@ complete, working slice over feature breadth.
   documented OpenAPI contract — either side could be rebuilt independently
   as long as it honors the contract.
 - Everything runs locally on one machine: frontend static page + local
-  backend + local SQLite file. No cloud deps, no auth, no accounts.
+  backend + local Postgres database (started with `docker compose up`, or
+  any Postgres you already have). No cloud deps, no auth, no accounts.
 
 ## 3. Non-goals (out of scope for v1)
 
@@ -91,6 +92,10 @@ Single table, `scores`:
 
 No updates or deletes in v1 — scores are append-only.
 
+Stored in Postgres (originally SQLite — see `docs/ai-usage-report.md` for
+that change). The table shape and constraints above are unchanged; only
+the storage engine is different.
+
 ## 7. API surface (summary — full contract lives in `openapi.yaml`)
 
 - `GET /api/health` → `{ status: "ok" }`
@@ -103,8 +108,8 @@ run on different localhost ports).
 ## 8. Architecture
 
 ```
-+----------------+        HTTP/JSON, per OpenAPI contract        +----------------+        SQLite (file)
-|   Frontend     |  <--------------------------------------->    |    Backend     |  <----------------->  scores.db
++----------------+        HTTP/JSON, per OpenAPI contract        +----------------+        SQL
+|   Frontend     |  <--------------------------------------->    |    Backend     |  <----------------->  Postgres
 | HTML5 canvas   |   POST /api/scores                            |   FastAPI      |
 | + React (Vite) |   GET  /api/scores                             |   Python       |
 | (game loop     |   GET  /api/health                            |                |
@@ -119,7 +124,11 @@ score, never frame-by-frame state.
 ## 9. Tech stack
 
 - Backend: Python, FastAPI (generates/validates against the OpenAPI
-  contract), SQLite via SQLAlchemy, run with `uv`.
+  contract), Postgres via SQLAlchemy + psycopg2, run with `uv`. A
+  `docker-compose.yml` at the repo root runs a local Postgres alongside
+  the backend for anyone who doesn't want to install Postgres themselves.
+  Originally SQLite; switched to Postgres — see `docs/ai-usage-report.md`
+  for that stage.
 - Frontend: React (via Vite), `<canvas>` for rendering the game itself —
   built with Node/npm (`npm run build`), served either by Vite's dev
   server locally or, in Docker, by the backend from the built `dist/`
@@ -138,7 +147,7 @@ score, never frame-by-frame state.
 - [ ] Spec reviewed and approved (this document).
 - [ ] `openapi.yaml` reviewed and approved.
 - [ ] Backend implements exactly the contract's endpoints, backed by
-      SQLite, and passes its tests.
+      Postgres, and passes its tests.
 - [ ] Frontend plays a full game start-to-finish, submits a score, and
       renders the leaderboard, using only the contract's endpoints.
 - [ ] Tests cover: score validation (rejects bad payloads), leaderboard

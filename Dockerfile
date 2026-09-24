@@ -35,11 +35,13 @@ COPY backend/app ./app
 # itself, not just JSON.
 COPY --from=frontend /frontend/dist ./static
 
-# SQLite lives here. Mount a volume at /app/data to persist scores across
-# container restarts/rebuilds (see README.md for the `docker run` command).
-RUN mkdir -p /app/data
-ENV DATABASE_URL=sqlite:////app/data/snake_arena.db
-VOLUME ["/app/data"]
+# Data now lives in Postgres, not this image -- see docker-compose.yml,
+# which runs a separate `db` service and passes it to this container via
+# DATABASE_URL. This default matches that service's hostname/credentials,
+# so `docker compose up` needs no extra configuration; running this image
+# standalone (docker run, no compose) requires passing a real DATABASE_URL,
+# since there's no Postgres reachable at "db" without it.
+ENV DATABASE_URL=postgresql://snake_arena:snake_arena@db:5432/snake_arena
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

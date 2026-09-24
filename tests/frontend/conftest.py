@@ -13,11 +13,12 @@ build` -- with VITE_API_BASE_URL pointed at this session's backend port
 the same build a real `npm run build` or `docker build` produces, not a
 stand-in for it. Requires Node/npm to be installed (see README.md).
 
-Fully isolated from anything you might be running yourself:
-- its own free ports (chosen dynamically, not 8000/5500), and
-- its own temporary SQLite file,
-so this suite never collides with, or writes into, your real
-backend/data/snake_arena.db.
+Isolated from anything you might be running yourself by using its own
+free ports (chosen dynamically, not 8000/5500). The backend it starts
+points at the same Postgres test database tests/conftest.py uses
+(snake_arena_test by default -- see TEST_DATABASE_URL there and in this
+file), reset to empty right before this backend starts, so this suite
+never touches your real snake_arena database or its leaderboard.
 """
 import os
 import shutil
@@ -30,10 +31,19 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
 FRONTEND_DIR = REPO_ROOT / "frontend"
+
+sys.path.insert(0, str(BACKEND_DIR))
+from app.database import Base  # noqa: E402
+
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://snake_arena:snake_arena@localhost:5432/snake_arena_test",
+)
 
 
 def _free_port() -> int:
@@ -64,16 +74,20 @@ def _npm_install_command() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def app_urls(tmp_path_factory):
-    tmp_dir = tmp_path_factory.mktemp("frontend-e2e")
-
+def app_urls():
     backend_port = _free_port()
     frontend_port = _free_port()
-    db_path = tmp_dir / "test_snake_arena.db"
 
-    # --- real backend, pointed at a throwaway database ---
+    # Start this suite from an empty database, the same way a fresh
+    # SQLite temp file used to -- see module docstring.
+    engine = create_engine(TEST_DATABASE_URL)
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    # --- real backend, pointed at the Postgres test database above ---
     env = os.environ.copy()
-    env["DATABASE_URL"] = f"sqlite:///{db_path}"
+    env["DATABASE_URL"] = TEST_DATABASE_URL
     backend_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(backend_port)],
         cwd=BACKEND_DIR,

@@ -3,7 +3,6 @@
 **/*.pyc
 backend/.venv/
 backend/.pytest_cache/
-backend/data/
 .pytest_cache/
 tests/
 docs/

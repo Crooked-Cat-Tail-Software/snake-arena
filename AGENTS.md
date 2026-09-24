@@ -19,9 +19,11 @@ snake-arena/
 ├── AGENTS.md                # This file
 ├── openapi.yaml             # THE contract — source of truth for the API
 ├── Dockerfile                # Node (builds frontend) + Python (backend, serves it)
+├── docker-compose.yml        # Backend + a local Postgres, wired together
+├── db-init/                  # Postgres init script (creates the test database)
 ├── .dockerignore
 ├── frontend/                 # React (Vite), built with npm — see frontend/package.json
-├── backend/                  # Python/FastAPI, SQLite persistence
+├── backend/                  # Python/FastAPI, Postgres persistence (via SQLAlchemy)
 │   └── app/main.py           # Mounts backend/static (built frontend) at "/" if present
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
 └── docs/
@@ -45,7 +47,22 @@ tests in `tests/` check.
 
 ## Setup & run
 
-Backend (from `backend/`):
+Backend needs a Postgres database to talk to. Easiest way — from the repo
+root, with Docker installed:
+```
+docker compose up -d db
+```
+This starts Postgres on `localhost:5432` with the database/credentials
+`backend/app/database.py` already defaults to, and also creates the
+separate `snake_arena_test` database the test suite uses (see `db-init/`).
+No Postgres install needed. (If something else is already using 5432,
+change the host-side port in `docker-compose.yml` and the matching
+defaults in `backend/app/database.py` / `tests/conftest.py` /
+`tests/frontend/conftest.py`. Don't have Docker? Any Postgres server
+works — create a `snake_arena` database and user matching `DATABASE_URL`,
+or set `DATABASE_URL` to point at what you already have.)
+
+Then the backend itself (from `backend/`):
 ```
 uv venv
 uv pip install -r requirements.txt
@@ -77,7 +94,10 @@ uv pip install -r ../tests/requirements.txt
 uv run playwright install chromium
 ```
 Node/npm must also be installed (see "Setup & run" above) — the frontend
-e2e tests build the real React app as part of the test run.
+e2e tests build the real React app as part of the test run. Postgres must
+be running too (`docker compose up -d db` from the repo root, or your own
+server) — the tests use its `snake_arena_test` database, reset before
+every run, so they never touch the real `snake_arena` database's data.
 
 Then, from `backend/`:
 ```
@@ -87,17 +107,18 @@ uv run pytest ../tests -v
 Tests should be run — and pass — before any change is considered done.
 `tests/` has two kinds:
 - `tests/test_*.py` — backend/API tests against an in-process TestClient
-  (fast, no browser). Validation rules, leaderboard ordering, contract
-  conformance with `openapi.yaml`.
+  (fast, no browser), run against the real `snake_arena_test` Postgres
+  database (reset before each test — see `tests/conftest.py`). Validation
+  rules, leaderboard ordering, contract conformance with `openapi.yaml`.
 - `tests/frontend/test_frontend.py` — end-to-end tests. `tests/frontend/
   conftest.py` runs a real `npm ci && npm run build` (pointed at a
-  throwaway backend port via `VITE_API_BASE_URL`), serves the built
-  `dist/`, and drives it with a real headless browser (Playwright). These
-  catch things the API tests can't: DOM behavior, keyboard handling,
-  screen transitions. When you fix a frontend bug found by manual
-  testing, add a regression test here (see the existing ones for the
-  pattern) — that's what happened for both bugs logged in
-  `docs/ai-usage-report.md`.
+  throwaway backend port via `VITE_API_BASE_URL` and the same Postgres
+  test database, reset before the run), serves the built `dist/`, and
+  drives it with a real headless browser (Playwright). These catch things
+  the API tests can't: DOM behavior, keyboard handling, screen
+  transitions. When you fix a frontend bug found by manual testing, add a
+  regression test here (see the existing ones for the pattern) — that's
+  what happened for both bugs logged in `docs/ai-usage-report.md`.
 
 ## Conventions
 
@@ -120,10 +141,12 @@ Tests should be run — and pass — before any change is considered done.
 
 - [x] `product-spec.md` — approved
 - [x] `openapi.yaml` — approved
-- [x] `backend/` — implemented (FastAPI + SQLAlchemy + SQLite), run locally
-      end-to-end and verified: health check, score submission + validation,
-      leaderboard ordering/limit, and real persistence to
-      `backend/data/snake_arena.db`.
+- [x] `backend/` — implemented (FastAPI + SQLAlchemy + Postgres), run
+      locally end-to-end and verified: health check, score submission +
+      validation, leaderboard ordering/limit, and real persistence to
+      Postgres. Originally SQLite; switched to Postgres, with
+      `docker-compose.yml` added so a local Postgres needs no manual
+      install — see `docs/ai-usage-report.md`.
 - [x] `frontend/` — React (Vite), HTML5 canvas for the game itself. Built
       with `npm run build` and played start-to-finish in a real headless
       browser (Playwright + Chromium) during verification: game renders,
@@ -133,10 +156,11 @@ Tests should be run — and pass — before any change is considered done.
       requirement — see `docs/ai-usage-report.md`.
 - [x] `tests/` — 9 backend tests against `openapi.yaml` + 6 frontend/e2e
       tests (Playwright), 15 total, all passing against the React build
-      via the real project test infrastructure (`pytest tests -v`). Two
-      of the frontend tests are regressions for the WASD-in-textbox and
-      name-input-width bugs found during manual review of the original
-      vanilla frontend; both verified still fixed in the React port.
+      and a real Postgres database via the real project test
+      infrastructure (`pytest tests -v`). Two of the frontend tests are
+      regressions for the WASD-in-textbox and name-input-width bugs found
+      during manual review of the original vanilla frontend; both
+      verified still fixed in the React port.
 - [x] `docs/ai-usage-report.md` — living log, updated after each stage
 - [x] `README.md` — run/test instructions for the backend and frontend
 - [x] `Dockerfile` — builds the frontend for real (Node: `npm ci && npm
@@ -146,3 +170,11 @@ Tests should be run — and pass — before any change is considered done.
       verified by reproducing the image's steps directly; `docker build`
       itself not run in this environment (no Docker Hub access) — run it
       once yourself to confirm.
+- [x] `docker-compose.yml` — runs the backend and a Postgres database
+      together (`docker compose up --build`); `db-init/` creates the
+      separate test database on first startup. Verified by reproducing
+      the same environment/credentials with a real local Postgres server
+      (health check, score submission, leaderboard, and the full
+      `pytest tests -v` suite all passing against it); `docker compose
+      up` itself not run in this environment for the same Docker Hub
+      reason as the Dockerfile above.

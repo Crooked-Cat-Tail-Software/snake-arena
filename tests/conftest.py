@@ -1,3 +1,15 @@
+"""Backend/API tests run against a real Postgres database now, not a
+throwaway SQLite file -- see docs/ai-usage-report.md for why. This needs
+a reachable Postgres server: `docker compose up -d db` starts one (and
+creates the snake_arena_test database this points at by default -- see
+db-init/001-create-test-db.sql), or point TEST_DATABASE_URL at any other
+Postgres you have.
+
+Unlike a fresh SQLite file per test, a real server can't be spun up fresh
+for free, so isolation instead comes from dropping and recreating every
+table before each test runs.
+"""
+import os
 import sys
 from pathlib import Path
 
@@ -12,15 +24,19 @@ sys.path.insert(0, str(BACKEND_DIR))
 from app.main import app  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://snake_arena:snake_arena@localhost:5432/snake_arena_test",
+)
+
+engine = create_engine(TEST_DATABASE_URL)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 @pytest.fixture()
-def client(tmp_path):
-    """A TestClient wired to a fresh, isolated SQLite file per test."""
-    db_path = tmp_path / "test.db"
-    engine = create_engine(
-        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
-    )
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+def client():
+    """A TestClient wired to a real Postgres database, reset before each test."""
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
     def override_get_db():
