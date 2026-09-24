@@ -26,6 +26,8 @@ snake-arena/
 ├── backend/                  # Python/FastAPI, Postgres persistence (via SQLAlchemy)
 │   └── app/main.py           # Mounts backend/static (built frontend) at "/" if present
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
+│   └── integration/          # pytest — runs real `docker compose build`/`up`
+├── pytest.ini                # registers the `integration` marker
 └── docs/
     └── ai-usage-report.md    # Log of how AI was used across this project
 ```
@@ -101,11 +103,12 @@ every run, so they never touch the real `snake_arena` database's data.
 
 Then, from `backend/`:
 ```
-uv run pytest ../tests -v
+uv run pytest ../tests --ignore=../tests/integration -v
 ```
 
 Tests should be run — and pass — before any change is considered done.
-`tests/` has two kinds:
+`tests/` has three kinds (the third is deliberately excluded from the
+command above — see "Docker integration tests" below):
 - `tests/test_*.py` — backend/API tests against an in-process TestClient
   (fast, no browser), run against the real `snake_arena_test` Postgres
   database (reset before each test — see `tests/conftest.py`). Validation
@@ -119,6 +122,29 @@ Tests should be run — and pass — before any change is considered done.
   transitions. When you fix a frontend bug found by manual testing, add a
   regression test here (see the existing ones for the pattern) — that's
   what happened for both bugs logged in `docs/ai-usage-report.md`.
+
+### Docker integration tests
+
+`tests/integration/` runs `docker compose build`/`up` for real and talks
+to the resulting containers — the only suite that actually exercises the
+`Dockerfile` and `docker-compose.yml` themselves rather than reproducing
+their steps by hand. It's marked `integration` (registered in
+`pytest.ini`) and excluded from the command above via `--ignore`, not via
+`-m "not integration"` — an `addopts`-based marker filter would make it
+impossible to select these tests from the command line at all, since a
+filter baked into `addopts` combines with (rather than being overridden
+by) an explicit `-m integration` on the command line.
+
+Run on its own, from `backend/`:
+```
+uv run pytest ../tests/integration -v
+```
+Requires Docker Desktop (or Docker Engine + Compose v2) running, and host
+ports 8000 and 5432 free. **Runs `docker compose down -v` before and
+after** — this deletes the Postgres volume, so never run it against a
+database you care about; see `README.md`'s "Run the Docker integration
+tests" section for the full requirements and what each of the four tests
+checks.
 
 ## Conventions
 
@@ -178,3 +204,18 @@ Tests should be run — and pass — before any change is considered done.
       `pytest tests -v` suite all passing against it); `docker compose
       up` itself not run in this environment for the same Docker Hub
       reason as the Dockerfile above.
+- [x] `tests/integration/` — 4 tests that run `docker compose build`/`up`
+      for real (build succeeds; health check comes up; a score round-trips
+      through the real Postgres container; the built frontend is served
+      and playable end-to-end). This is the one part of the project with
+      no available substitute for the real thing — the object under test
+      IS `docker compose build`/`up` themselves, and I have no Docker
+      access anywhere in my environment. What was verified instead: the
+      tests collect correctly and are excluded from the fast suite by
+      `--ignore` (confirmed via `pytest --collect-only`: 19 tests without
+      the ignore, 15 with it), and the fixture/helper logic (health-check
+      polling, and all four `docker_build`→`compose_up` control-flow
+      branches: build failure, up failure, health timeout, success) is
+      correct, tested against mocked subprocesses and a real local HTTP
+      server. Human review pending — run `pytest tests/integration -v`
+      yourself with Docker running for the first real signal.

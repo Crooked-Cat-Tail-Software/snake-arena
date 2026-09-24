@@ -499,3 +499,94 @@ again with no environment overrides, against a real local Postgres server
 on the standard port 5432 — 15/15 passing.
 
 **Human review:** pending.
+
+## Stage 9 — Integration tests against docker-compose
+
+**Asked for:** integration tests that run against `docker-compose.yaml`.
+Proposed a tiered set of scenarios and asked which to build — answer:
+**core only** (build succeeds; health check comes up; a score round-trips
+through the real Postgres container; the built frontend is served and
+playable end-to-end via a real browser) — deferring the "recommended"
+tier (data survives a restart, test-db isolation, teardown/volume
+removal) and "lower priority" tier (input validation through the real
+stack, crash recovery) unless asked for later.
+
+**AI produced:**
+- `tests/integration/conftest.py` (new) — `docker_build` (session-scoped,
+  runs `docker compose build` once, doesn't raise on failure so a broken
+  build shows up as one clear failing test) and `compose_up` (session-
+  scoped, depends on `docker_build`; runs `docker compose down -v` first
+  to guarantee a clean volume, then `docker compose up -d`, then polls
+  `/api/health` until it responds or times out — dumping `docker compose
+  logs` into the failure message if it never comes up — and always runs
+  `docker compose down -v` again in a `finally`, whether the tests passed,
+  failed, or errored).
+- `tests/integration/test_docker_compose.py` (new) — the four core
+  scenarios: `test_build_succeeds`, `test_health_check_becomes_available`,
+  `test_score_round_trips_through_postgres` (submits a score through the
+  real container and reads it back off the leaderboard, proving the
+  backend actually reaches Postgres over the compose network — DNS for
+  the `db` hostname, `DATABASE_URL`, psycopg2 in the built image — not a
+  database this project already knows works), and
+  `test_frontend_is_served_and_playable` (plays a full game through a
+  real browser against the container-served frontend, the same shape as
+  the `tests/frontend/` suite but against the actual built image instead
+  of a dev build).
+- `pytest.ini` (new, repo root) — registers an `integration` marker
+  (documentation/tooling only) and marks the new test file with
+  `pytestmark = pytest.mark.integration`. Deliberately **not** using
+  `addopts = -m "not integration"` to exclude it from the default run:
+  that would make the integration tests impossible to select from the
+  command line at all, since an `addopts`-injected marker filter combines
+  with rather than being overridden by an explicit `-m integration` on
+  the command line. Used `--ignore=tests/integration` in the documented
+  fast-suite command instead, which cleanly excludes the directory while
+  leaving `pytest tests/integration -v` free to run it directly.
+- `README.md`, `AGENTS.md` — new "Run the Docker integration tests"
+  section/subsection (requirements, the port-availability and data-wipe
+  warnings, what each test checks), the documented fast-suite command
+  updated to `--ignore=tests/integration`, and status sections updated.
+
+**Verification actually performed:** this is the first stage of the
+project where I had no substitute available for the real thing, in any
+environment — every earlier Docker-adjacent stage (the Dockerfile, then
+docker-compose itself) could at least be verified by reproducing the
+image's/compose file's steps by hand against a real, separately-installed
+Postgres server. Here the object under test **is** `docker compose
+build`/`up` themselves, and I have no Docker access anywhere (cloud
+sandbox blocks Docker Hub; the device bridge to this machine has no
+`docker` installed at all). So what I actually verified was narrower:
+- The new files are syntactically valid (`py_compile`) and collect
+  correctly: `pytest tests --collect-only -q` finds 19 tests without the
+  `--ignore`, 15 with it — confirming both that the integration tests are
+  discovered and that `--ignore=tests/integration` actually excludes them.
+- The **logic** inside `conftest.py` — not the real Docker calls, which I
+  can't make — is correct: called the `compose_up` fixture's raw function
+  directly (bypassing pytest's fixture injection) with `docker compose`
+  itself mocked out via `unittest.mock.patch`, under four scenarios (build
+  fails, `up` fails, health check times out, everything succeeds), and
+  confirmed in each case it behaves as intended — stopping before `up` on
+  a build failure, surfacing Docker's own stderr on an `up` failure,
+  dumping `docker compose logs` on a health-check timeout, and — on
+  success — running `down -v` both before yielding and afterward via
+  `finally`. Also verified the health-check polling helper against a real
+  local `http.server` (detects it near-instantly; correctly times out
+  against nothing listening) and confirmed the `docker compose <args>`
+  subprocess command is constructed with the right arguments
+  (`cwd`/`timeout`/`capture_output`/`text`).
+- Re-ran the existing fast suite end-to-end against real Postgres after
+  all these changes — still **15/15 passing**, confirming nothing about
+  the new `pytest.ini`/marker registration broke the existing tests.
+- What this does **not** prove: that `docker compose build` and `docker
+  compose up` will actually succeed against the real `Dockerfile` and
+  `docker-compose.yml` on your machine, that the healthcheck actually
+  gates backend startup the way it's supposed to, or that the four tests
+  themselves pass against real containers. None of that can be checked
+  without Docker. **Please run `uv run pytest ../tests/integration -v`
+  yourself, with Docker Desktop running and ports 8000/5432 free, for the
+  first real signal on these tests** — see `README.md`'s "Run the Docker
+  integration tests" section, including its data-wipe warning, before you
+  do.
+
+**Human review:** pending — in particular, whether the four tests
+actually pass against real Docker on your machine is still unknown to me.

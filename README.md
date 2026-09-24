@@ -22,6 +22,8 @@ backend → frontend → tests, with a human review checkpoint after each.
       building the frontend for real with Node/npm
 - [x] docker-compose.yml — runs that container together with a local
       Postgres database, no separate install needed
+- [x] Integration tests (`tests/integration/`) — run `docker compose
+      build`/`up` for real and exercise the resulting containers
 
 ## Requirements
 
@@ -78,7 +80,9 @@ data survives container restarts (it's in a named volume) — use
 There are two kinds of tests in `tests/`: backend/API tests (fast, no
 browser needed) and frontend/end-to-end tests (drive a real browser
 against a real, temporarily-running copy of the app). Both run with one
-`pytest` command.
+`pytest` command. (A third kind, `tests/integration/`, runs against a
+real `docker compose up` and is deliberately kept out of this command —
+see "Run the Docker integration tests" below.)
 
 One-time setup, in addition to the backend install above:
 
@@ -101,8 +105,13 @@ leaderboard.
 Then, from `backend/`:
 
 ```bash
-uv run pytest ../tests -v
+uv run pytest ../tests --ignore=../tests/integration -v
 ```
+
+(The `--ignore` keeps this to the fast suite — `tests/integration/` needs
+Docker and is run separately; see below. Without it, `pytest` also
+collects the integration tests, which will fail immediately if Docker
+isn't running.)
 
 All 15 tests should pass:
 - **Backend/API tests** (`tests/test_health.py`, `tests/test_scores.py`)
@@ -199,3 +208,62 @@ suite (15/15) against that same Postgres server. I was not able to run
 network doesn't allow reaching Docker Hub for the base images), so those
 exact commands are worth running once yourself before you rely on them —
 see `docs/ai-usage-report.md` for the full story.
+
+## Run the Docker integration tests
+
+`tests/integration/` is different from the two suites above: it runs
+`docker compose build` and `docker compose up` for real and talks to the
+resulting containers over the network, so it's the only place that
+actually exercises the `Dockerfile`'s build and `docker-compose.yml`'s
+orchestration (the healthcheck gating, the `db`/`backend` network,
+volumes) rather than reproducing their steps by hand.
+
+Requirements:
+- Docker Desktop (or another Docker Engine with the Compose v2 plugin)
+  running
+- Host ports **8000** and **5432** free (see "Run it in Docker" above if
+  5432 is already taken by something else on your machine)
+
+**Before you run this, know that it deletes your Postgres data.** The
+suite runs `docker compose down -v` both before and after it runs, to
+guarantee a clean, fresh database for the tests — that also deletes
+whatever leaderboard data you had. Don't run it while you're using the
+app for real; run it on its own, not mixed in with playing the game.
+
+From `backend/`:
+
+```bash
+uv run pytest ../tests/integration -v
+```
+
+Four tests:
+- **`test_build_succeeds`** — `docker compose build` completes.
+- **`test_health_check_becomes_available`** — the stack comes up (the
+  backend only starts once Postgres's healthcheck passes) and
+  `/api/health` responds.
+- **`test_score_round_trips_through_postgres`** — submits a score through
+  the real backend container and reads it back, proving the backend can
+  actually reach Postgres over the compose network (DNS resolution of the
+  `db` hostname, `DATABASE_URL`, psycopg2 in the built image) — not a
+  database this project already knows works.
+- **`test_frontend_is_served_and_playable`** — loads the app from the
+  container in a real browser and plays a full game end-to-end, the same
+  way the frontend/e2e suite does, but against the actual built image.
+
+Note on verification: this is the one part of the project I could not
+verify by reproducing the steps by hand, because the thing under test
+*is* `docker compose build`/`up` themselves — I have no Docker access in
+any environment available to me. What I did verify: the test files
+compile and collect correctly, `--ignore=tests/integration` correctly
+excludes them from the fast suite (confirmed via `pytest --collect-only`:
+19 tests collected without the ignore, 15 with it), and the fixture and
+helper *logic* — the health-check polling loop and the `docker_build` →
+`compose_up` fixture's control flow (build failure, `up` failure,
+health-check timeout, and success, including that `down -v` always runs
+via `finally`) — behaves correctly, tested against mocked `subprocess`
+calls and a real local HTTP server standing in for the health endpoint.
+That proves the code's logic is sound but does **not** prove the real
+`docker compose build`/`up` commands will succeed on your machine —
+please run `uv run pytest ../tests/integration -v` yourself with Docker
+Desktop running to get the first real pass/fail signal on these four
+tests.
