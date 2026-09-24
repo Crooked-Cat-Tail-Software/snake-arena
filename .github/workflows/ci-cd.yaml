@@ -1,0 +1,233 @@
+name: CI/CD
+
+# Tests run on every push and pull request against main, same as any
+# normal CI. The deploy job is different: it only exists on a manual
+# "Run workflow" click (see the `if:` on the deploy job below) -- a
+# push to main never deploys anything to AWS by itself. That's a
+# deliberate choice for a class project: AWS deploys create real,
+# billable resources (see infra/aws/README.md's cost estimate), so
+# they shouldn't happen as a side effect of every merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_NAME: snake-arena
+  # This project's assigned Region under the AWS "new experience"
+  # account type -- see infra/aws/deploy.sh's comment. Override here
+  # (and the AWS_DEPLOY_ROLE_ARN variable's account) if that doesn't
+  # match your AWS account.
+  AWS_REGION: us-east-2
+  POSTGRES_USER: snake_arena
+  POSTGRES_PASSWORD: snake_arena
+  POSTGRES_DB: snake_arena
+
+jobs:
+  # --- "runs backend and frontend tests in parallel" -- these two jobs
+  # have no `needs:` on each other, so GitHub Actions runs them
+  # concurrently by default. ---
+
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U snake_arena -d snake_arena"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create the test database
+        # docker-compose.yml gets this for free from db-init/ on a fresh
+        # volume; a GitHub Actions service container has no such
+        # mechanism, so this recreates that one step by hand.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          PGPASSWORD="${{ env.POSTGRES_PASSWORD }}" psql -h localhost -U "${{ env.POSTGRES_USER }}" -d "${{ env.POSTGRES_DB }}" \
+            -c "CREATE DATABASE snake_arena_test;"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql://snake_arena:snake_arena@localhost:5432/snake_arena_test
+        run: uv run pytest ../tests --ignore=../tests/integration --ignore=../tests/frontend -v
+
+  frontend-tests:
+    name: Frontend tests (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U snake_arena -d snake_arena"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create the test database
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          PGPASSWORD="${{ env.POSTGRES_PASSWORD }}" psql -h localhost -U "${{ env.POSTGRES_USER }}" -d "${{ env.POSTGRES_DB }}" \
+            -c "CREATE DATABASE snake_arena_test;"
+
+      - name: Install backend dependencies
+        # tests/frontend/conftest.py starts a real backend as a
+        # subprocess (see that file's docstring), so it needs the same
+        # backend deps as backend-tests, plus playwright/pytest-playwright.
+        working-directory: backend
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+          uv pip install -r ../tests/requirements.txt
+
+      - name: Install Playwright's browser
+        working-directory: backend
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run frontend/e2e tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql://snake_arena:snake_arena@localhost:5432/snake_arena_test
+        run: uv run pytest ../tests/frontend -v
+
+  # --- "builds the Docker Compose stack and runs integration and
+  # end-to-end tests against it" -- tests/integration/ does exactly
+  # this (see its conftest.py docstring): a real `docker compose
+  # build`/`up`, then both integration-style tests and one full
+  # browser-driven end-to-end test against the resulting containers.
+  # Gated behind the two jobs above passing first, since it's by far
+  # the most expensive job (a full Docker image build) -- no reason to
+  # pay for it if something faster already failed. ---
+  docker-compose-integration-tests:
+    name: Docker Compose integration & e2e tests
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install backend dependencies
+        # Only the test runner's own deps are needed here -- the app's
+        # dependencies get installed *inside* the Docker build this
+        # suite runs, not on the runner itself.
+        working-directory: backend
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      - name: Run Docker Compose integration tests
+        # ubuntu-latest ships Docker + the Compose v2 plugin already.
+        # Host ports 8000/5432 are free on a fresh runner, matching
+        # what tests/integration/conftest.py expects (see README.md).
+        working-directory: backend
+        run: uv run pytest ../tests/integration -v
+
+  # --- "deploys to AWS using a GitHub OIDC role" + "validates that the
+  # deploy is successful by checking the health endpoint" -- only runs
+  # on a manual "Run workflow" click (see the `on:` block's
+  # workflow_dispatch and this job's `if:`), never on a plain push. ---
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: [docker-compose-integration-tests]
+    if: github.event_name == 'workflow_dispatch'
+    # Required for GitHub's OIDC token to be minted for this job --
+    # without this, aws-actions/configure-aws-credentials has nothing
+    # to present to AWS.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy ECR + app stacks
+        run: |
+          chmod +x infra/aws/deploy.sh
+          infra/aws/deploy.sh "$PROJECT_NAME" "$AWS_REGION"
+
+      - name: Get the app URL
+        id: app_url
+        run: |
+          url=$(aws cloudformation describe-stacks \
+            --stack-name "${PROJECT_NAME}-app" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" \
+            --output text)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $url"
+
+      - name: Validate deploy via the health endpoint
+        # The ALB's target group can take a minute or two after the
+        # stack finishes for health checks to start passing (see
+        # infra/aws/README.md) -- poll instead of checking once.
+        run: |
+          health_url="${{ steps.app_url.outputs.url }}/api/health"
+          echo "Polling $health_url ..."
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "$health_url"; then
+              echo
+              echo "Healthy after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "Not ready yet (attempt $i/30) -- waiting 10s..."
+            sleep 10
+          done
+          echo "::error::$health_url never returned a healthy response after 5 minutes"
+          exit 1

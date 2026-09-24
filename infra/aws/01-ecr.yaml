@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Snake Arena -- ECR repository for the application image. Deploy this
+  stack first (see infra/aws/README.md / deploy.sh): the image needs to
+  exist in the repository before 02-app.yaml's ECS service can reference
+  it by URI.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: snake-arena
+    Description: >
+      Used to name/tag resources across both templates. Keep it the same
+      value for 01-ecr.yaml and 02-app.yaml.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        # Keeps the repository from growing unbounded across repeated
+        # deploy.sh runs (each push uses a fresh timestamp tag).
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the 10 most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  RepositoryUri:
+    Description: Push/pull URI for the image -- consumed by deploy.sh and 02-app.yaml's ImageUri parameter.
+    Value: !GetAtt Repository.RepositoryUri
+    Export:
+      Name: !Sub "${ProjectName}-ecr-repository-uri"
+  RepositoryName:
+    Description: Repository name -- used by teardown.sh to empty it before deleting the stack.
+    Value: !Ref Repository
+    Export:
+      Name: !Sub "${ProjectName}-ecr-repository-name"

@@ -28,6 +28,11 @@ snake-arena/
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
 │   └── integration/          # pytest — runs real `docker compose build`/`up`
 ├── pytest.ini                # registers the `integration` marker
+├── infra/
+│   └── aws/                  # CloudFormation templates + deploy/teardown scripts
+├── .github/
+│   └── workflows/
+│       └── ci-cd.yaml         # tests in CI; manually-triggered AWS deploy job
 └── docs/
     └── ai-usage-report.md    # Log of how AI was used across this project
 ```
@@ -219,3 +224,51 @@ checks.
       correct, tested against mocked subprocesses and a real local HTTP
       server. Human review pending — run `pytest tests/integration -v`
       yourself with Docker running for the first real signal.
+- [x] `infra/aws/` — CloudFormation for an AWS deployment (RDS Postgres,
+      ECS Fargate, an ALB) plus `deploy.sh`/`teardown.sh`. Required a
+      small, backward-compatible addition to `backend/app/database.py`
+      (build the connection string from split `DB_HOST`/`DB_USER`/etc.
+      env vars when `DB_HOST` is set, since the RDS endpoint and password
+      aren't known until deploy time; `DATABASE_URL` still works
+      unchanged for local/Docker Compose). No available substitute for
+      the real thing here either — I have no AWS credentials or network
+      access to AWS's API from any environment available to me. What was
+      verified instead: both templates pass `cfn-lint` with zero
+      errors/warnings, both scripts pass `shellcheck` cleanly, the
+      `database.py` URL-construction logic is tested against real cases
+      (default, `DATABASE_URL` override, `DB_HOST` with special
+      characters in the password, round-tripped through SQLAlchemy's own
+      URL parser), and the existing backend suite still passes 9/9 after
+      the change. Human review pending — run `infra/aws/deploy.sh`
+      yourself (with the AWS CLI configured and Docker running) for the
+      first real signal on whether the deployment actually works; see
+      `infra/aws/README.md` for the cost estimate first.
+- [x] `.github/workflows/ci-cd.yaml` — backend tests and frontend/e2e
+      (Playwright) tests run in parallel jobs against a Postgres service
+      container; a third job then builds and runs the Docker Compose
+      integration/e2e suite for real, gated behind the first two passing
+      (to avoid paying for the slowest job when something faster already
+      failed). A fourth job, manually triggered only (never on a plain
+      push, to avoid AWS costs on every merge), authenticates via a
+      GitHub OIDC role (`infra/aws/00-github-oidc.yaml` — a new
+      CloudFormation template, IAM-role-only, scoped to this repo/branch
+      and to exactly the permissions `deploy.sh` needs), runs
+      `deploy.sh`, and polls `/api/health` to confirm the deploy is
+      actually healthy before the job succeeds. Also corrected
+      `deploy.sh`/`teardown.sh`'s default Region from `us-east-1` to
+      `us-east-2` — the AWS Agent Toolkit setup earlier in this project
+      revealed that's this account's actual assigned Region under the
+      "new AWS experience" account type, which the original default
+      predates. No available substitute for the real thing here either
+      — I have no way to execute a GitHub Actions run or an OIDC token
+      exchange against real AWS from this session. What was verified
+      instead: `00-github-oidc.yaml` passes `cfn-lint` with zero
+      errors/warnings, `ci-cd.yaml` passes `actionlint` (validates
+      workflow syntax/expressions, action references, and shellchecks
+      every embedded script) with zero findings, and the GitHub-documented
+      OIDC thumbprint was looked up fresh via web search against AWS's
+      own security blog rather than recalled (a first, wrong recollection
+      was caught this way before it reached the template). Human review
+      pending — push this to GitHub, do the one-time OIDC role setup in
+      `infra/aws/README.md`'s CI/CD section, and treat the first "Run
+      workflow" click as the real test.

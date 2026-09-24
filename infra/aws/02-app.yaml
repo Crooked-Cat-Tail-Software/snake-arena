@@ -1,0 +1,412 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Snake Arena -- the application itself: a VPC, an RDS Postgres database,
+  an ECS Fargate service running the app container, and an internet-facing
+  Application Load Balancer in front of it. Deploy 01-ecr.yaml first, push
+  an image to it, then deploy this stack with that image's URI as the
+  ImageUri parameter (deploy.sh does all of this for you -- see
+  infra/aws/README.md).
+
+  Cost note: this creates real, billable resources (RDS instance, ALB,
+  Fargate task) that keep costing money while the stack exists, whether or
+  not anyone is playing the game -- see README.md for a rough estimate and
+  use teardown.sh when you're done with it.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: snake-arena
+    Description: Used to name/tag every resource in this stack, and to look up 01-ecr.yaml's exports.
+
+  ImageUri:
+    Type: String
+    Description: >
+      Full ECR image URI including tag, e.g.
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/snake-arena:20260101120000.
+      Produced by pushing an image to the repository 01-ecr.yaml creates
+      (deploy.sh does this for you).
+
+  DBMasterUsername:
+    Type: String
+    Default: snake_arena
+    Description: RDS master username. Matches the app's expected DB_USER.
+
+  DBName:
+    Type: String
+    Default: snake_arena
+    Description: Database name the app connects to.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    Description: >
+      Smallest/cheapest widely-available class. db.t3.micro is a
+      same-price x86 alternative if t4g (Graviton/ARM) isn't available in
+      your account/region.
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    Description: GB. 20 is RDS's minimum for Postgres gp3 storage.
+
+  ContainerCpu:
+    Type: String
+    Default: "256"
+    Description: Fargate task CPU units (256 = 0.25 vCPU, the smallest/cheapest size). Must pair with a valid ContainerMemory -- see AWS Fargate task size table.
+
+  ContainerMemory:
+    Type: String
+    Default: "512"
+    Description: Fargate task memory in MB. 512 is the smallest value valid with 256 CPU units.
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Number of running copies of the app. 1 is enough for a class exercise; the leaderboard lives in RDS, not in the container, so this can scale later without code changes.
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.0.0/24
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+
+Resources:
+  # ---------------------------------------------------------------------
+  # Networking: one VPC, two public subnets (two AZs -- required by both
+  # the ALB and the RDS subnet group), no NAT gateway. Keeping everything
+  # in public subnets (with security groups doing the actual access
+  # control, not subnet placement) avoids a NAT gateway's ~$30+/month
+  # fixed cost, which isn't worth it for a class exercise. RDS still sets
+  # PubliclyAccessible: false, so it gets no public IP regardless of the
+  # subnet's route table -- only resources in the ECS security group can
+  # reach it, enforced at the security-group layer.
+  # ---------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------------------------------------------------------------
+  # Security groups
+  # ---------------------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} ALB -- allows inbound HTTP from the internet"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-alb-sg"
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} ECS tasks -- allows inbound only from the ALB"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-ecs-sg"
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} RDS -- allows inbound only from the ECS tasks"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-sg"
+
+  # ---------------------------------------------------------------------
+  # Database: RDS Postgres. ManageMasterUserPassword lets RDS generate
+  # and own the master password in AWS Secrets Manager -- it never
+  # appears in this template, the stack's parameters, or CloudTrail in
+  # plaintext. The ECS execution role below is granted read access to
+  # that specific secret, and the task definition injects it directly
+  # into the container as DB_PASSWORD (see backend/app/database.py's
+  # split-var connection logic).
+  # ---------------------------------------------------------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} DB subnet group"
+      SubnetIds:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      Engine: postgres
+      # Pinned to a concrete, currently-supported minor version rather
+      # than a bare major version (RDS doesn't accept a bare major
+      # version like "16" for new instances). If this has aged out by
+      # the time you deploy, check the current list at
+      # https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.DBVersions.html
+      # and bump it -- any 16.x is fine, the app doesn't depend on a
+      # specific minor version.
+      EngineVersion: "16.15"
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      MasterUsername: !Ref DBMasterUsername
+      ManageMasterUserPassword: true
+      DBName: !Ref DBName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 7
+      # DeletionProtection is off on purpose -- this is a class exercise
+      # meant to be torn down between sessions (see teardown.sh), not a
+      # production database. Turn it on if that stops being true.
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db"
+
+  # ---------------------------------------------------------------------
+  # ECS: cluster, log group, execution role, task definition, service
+  # ---------------------------------------------------------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}"
+      RetentionInDays: 14
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-execution-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Pull the image from ECR, write container logs to CloudWatch.
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: GetDbSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !GetAtt DBInstance.MasterUserSecret.SecretArn
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-task"
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ProjectName
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            # Split-var form (see backend/app/database.py) -- the RDS
+            # endpoint is only known at deploy time, and the password
+            # comes from Secrets Manager below, not a plain env var.
+            - Name: DB_HOST
+              Value: !GetAtt DBInstance.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt DBInstance.Endpoint.Port
+            - Name: DB_NAME
+              Value: !Ref DBName
+          Secrets:
+            - Name: DB_USER
+              ValueFrom: !Sub "${DBInstance.MasterUserSecret.SecretArn}:username::"
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub "${DBInstance.MasterUserSecret.SecretArn}:password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ---------------------------------------------------------------------
+  # Load balancer
+  # ---------------------------------------------------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-tg"
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Sub "${ProjectName}-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Ref ProjectName
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  AppUrl:
+    Description: Open this in a browser to play the game.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+
+  DBEndpoint:
+    Description: RDS endpoint (for reference/debugging -- not reachable from outside the VPC).
+    Value: !GetAtt DBInstance.Endpoint.Address
+
+  ECSClusterName:
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Value: !Sub "${ProjectName}-service"

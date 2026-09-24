@@ -24,6 +24,13 @@ backend → frontend → tests, with a human review checkpoint after each.
       Postgres database, no separate install needed
 - [x] Integration tests (`tests/integration/`) — run `docker compose
       build`/`up` for real and exercise the resulting containers
+- [x] AWS deployment (`infra/aws/`) — CloudFormation templates + a
+      deploy script that runs the app on ECS Fargate with RDS Postgres,
+      behind a load balancer
+- [x] CI/CD (`.github/workflows/ci-cd.yaml`) — backend and frontend
+      tests run in parallel, then the Docker Compose integration/e2e
+      suite; a manually-triggered job deploys to AWS via a GitHub OIDC
+      role (no stored credentials) and validates it via `/api/health`
 
 ## Requirements
 
@@ -267,3 +274,26 @@ That proves the code's logic is sound but does **not** prove the real
 please run `uv run pytest ../tests/integration -v` yourself with Docker
 Desktop running to get the first real pass/fail signal on these four
 tests.
+
+## Deploy to AWS
+
+`infra/aws/` has CloudFormation templates and a deploy script that run
+the app on AWS: ECS Fargate for the container, managed RDS for Postgres,
+behind an Application Load Balancer. See
+[infra/aws/README.md](infra/aws/README.md) for the architecture, cost
+estimate, and how to run it (`./deploy.sh`) and tear it back down
+(`./teardown.sh`) — like the Docker commands above, these are meant to
+be run by you, not by Claude, since deploying needs your own AWS
+credentials.
+
+## CI/CD
+
+`.github/workflows/ci-cd.yaml` runs the backend and frontend/e2e test
+suites in parallel on every push/PR to `main`, then the Docker Compose
+integration suite if both pass. A separate, manually-triggered job
+deploys to AWS via a keyless GitHub OIDC role and checks `/api/health`
+to confirm the deploy actually came up healthy. See [infra/aws/README.md's
+CI/CD section](infra/aws/README.md#cicd-github-actions) for the one-time
+setup (deploying the OIDC role, adding its ARN as a GitHub Actions
+variable) — that part still needs to be run by you, for the same reason
+as the AWS deploy itself.

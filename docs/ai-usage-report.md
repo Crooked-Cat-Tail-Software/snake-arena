@@ -590,3 +590,249 @@ sandbox blocks Docker Hub; the device bridge to this machine has no
 
 **Human review:** pending — in particular, whether the four tests
 actually pass against real Docker on your machine is still unknown to me.
+
+## Stage 10 — Deploy to AWS with CloudFormation
+
+**Asked for:** deploy the application to AWS, using CloudFormation.
+Clarified scope before building, since this had several independent
+decisions (three questions, given how differently each answer could
+send the work): (1) whether I should actually run the deployment or
+just author the templates for you to run — answer: **actually deploy
+it**, though this ran into a hard constraint described below; (2) how
+Postgres should run in AWS — answer: **managed RDS**; (3) how the app
+container should run — answer: **ECS Fargate**.
+
+Before writing anything, I checked whether I could actually run a
+deployment from any environment available to me: no `aws` CLI in the
+cloud sandbox, no AWS credentials anywhere, and network access to AWS's
+API is blocked by egress policy from both the cloud sandbox and the
+bridge to your computer (confirmed via a direct connection test to
+`sts.amazonaws.com`, which failed with a proxy-level `403`/`connect_rejected`
+in the sandbox and the equivalent in the device bridge). This is the
+same category of restriction that's blocked Docker Hub access all
+session — I'm not able to run `aws cloudformation deploy` (or the
+`docker build`/`push` steps a deployment needs) myself, regardless of
+which architecture we picked. I surfaced this and confirmed you still
+wanted the templates + a runbook for you to execute yourself, which is
+the recommended default in the question I originally asked before
+proceeding.
+
+**AI produced:**
+- `backend/app/database.py` — small, backward-compatible addition: a
+  new `_database_url_from_env()` helper that builds the connection
+  string from split `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`
+  environment variables (URL-encoding user/password) whenever `DB_HOST`
+  is set, taking priority over `DATABASE_URL`. `DATABASE_URL` remains
+  the default path and is completely unchanged for local dev and
+  `docker-compose.yml` — only the ECS task definition sets `DB_HOST`,
+  since the RDS endpoint doesn't exist until deploy time and the
+  password comes from AWS Secrets Manager rather than a plain env var.
+- `infra/aws/01-ecr.yaml` (new) — a CloudFormation stack for the ECR
+  repository the app image gets pushed to (image scanning on push, a
+  lifecycle policy keeping only the 10 most recent images). Deployed
+  first, since the app stack's ECS task definition needs to reference an
+  image that already exists.
+- `infra/aws/02-app.yaml` (new) — the main stack: a VPC with two public
+  subnets across two AZs (no NAT gateway, to avoid its ~$30+/month fixed
+  cost — security groups do the actual access control instead of subnet
+  placement), security groups scoped so only the ALB can reach the ECS
+  tasks and only the ECS tasks can reach RDS, an RDS Postgres instance
+  (`db.t4g.micro`, single-AZ, `ManageMasterUserPassword` so the master
+  password is generated and owned by Secrets Manager rather than
+  appearing anywhere in the template), an ECS cluster/task
+  definition/service on Fargate (the task's execution role is granted
+  read access to that specific Secrets Manager secret, nothing broader),
+  and an internet-facing ALB with a health check against `/api/health`.
+  Outputs the app URL, DB endpoint, and cluster/service names.
+- `infra/aws/deploy.sh` (new) — deploys the ECR stack, builds the image
+  from the existing `Dockerfile`, pushes it to ECR under a
+  timestamp tag, then deploys the app stack with that image's URI and
+  prints the resulting app URL. Meant to be run by you, not by me.
+- `infra/aws/teardown.sh` (new) — deletes the app stack (RDS included —
+  this destroys the leaderboard data, no separate backup is kept),
+  empties and deletes the ECR repository stack. Asks for a typed
+  confirmation of the project name before doing anything, since this is
+  irreversible.
+- `infra/aws/README.md` (new) — architecture diagram, prerequisites,
+  deploy/teardown instructions, a cost estimate (researched current
+  `us-east-1` pricing rather than relying on possibly-stale training
+  data — see Verification below), and a troubleshooting section for the
+  failure modes I could anticipate but not test (Secrets Manager access,
+  RDS engine version deprecation over time).
+- `README.md`, `AGENTS.md` — new "Deploy to AWS" section/status entry
+  pointing at `infra/aws/README.md`, repo layout tree updated.
+
+**Verification actually performed:** this stage has the same fundamental
+limitation as the Docker integration tests in Stage 9 — no substitute
+was available anywhere for the real thing, since the object under test
+*is* `aws cloudformation deploy` and the AWS resources it creates, and I
+have no AWS access in any environment available to me (confirmed by
+testing, not assumed — see above). What I verified instead:
+- Both CloudFormation templates pass `cfn-lint` (installed via pip, pure
+  local schema/semantic validation, no AWS calls needed) with **zero
+  errors or warnings** on the final version — the first pass flagged
+  `EngineVersion: "16"` as invalid for new RDS instances, which I fixed
+  by pinning to a specific supported minor version (`16.15`) rather than
+  a bare major version, after confirming via web search what's currently
+  supported (training data alone isn't reliable here, since RDS's
+  supported-version list changes over time).
+- Both shell scripts pass `shellcheck` cleanly (one real finding, fixed:
+  an unused variable in `teardown.sh` left over from an earlier draft)
+  and pass `bash -n` syntax checks.
+- Both templates are well-formed YAML (parsed successfully with a
+  CloudFormation-tag-tolerant YAML loader).
+- The new `database.py` logic was tested directly against four cases:
+  nothing set (falls back to the existing default), `DATABASE_URL` set
+  with no `DB_HOST` (unchanged, uses `DATABASE_URL` — confirming
+  backward compatibility), `DB_HOST` set alongside a password containing
+  `@`, `/`, and `:` (confirming URL-encoding), and round-tripping that
+  constructed URL through SQLAlchemy's own `make_url()` parser to
+  confirm the password survives exactly, not just that string
+  construction *looked* right.
+- Re-ran the existing backend test suite (`pytest tests
+  --ignore=tests/integration`) against real Postgres after the
+  `database.py` change — still **9/9 passing**, confirming the change
+  didn't affect local/Docker Compose behavior. Also re-confirmed the
+  `tests/integration` collection counts (19 total, 15 with `--ignore`)
+  are unchanged from Stage 9.
+- The cost estimate in `infra/aws/README.md` is based on current
+  `us-east-1` pricing found via web search at the time of writing (RDS
+  `db.t4g.micro`, ALB base rate, Fargate per-vCPU/GB rates), not recalled
+  from training data, specifically because AWS pricing and free-tier
+  terms change and I didn't want to hand you a stale number with false
+  confidence.
+- What none of this proves: that `aws cloudformation deploy` will
+  actually succeed against a real AWS account, that the ECS task will
+  actually start and pass its health check, that the IAM permissions
+  I've scoped are exactly sufficient (not too narrow) in practice, or
+  that the RDS/ECS/ALB pieces actually talk to each other correctly once
+  real. **Please run `infra/aws/deploy.sh` yourself, with the AWS CLI
+  configured and Docker running, for the first real signal** — see
+  `infra/aws/README.md`'s cost estimate before you do, since this
+  creates real, billable resources.
+
+**Human review:** pending — in particular, whether the deployment
+actually succeeds against a real AWS account is entirely unknown to me;
+this is the first stage where even syntax-level tooling (`cfn-lint`,
+`shellcheck`) was the full extent of what I could check, with no way to
+exercise the actual AWS control plane at all.
+
+## Stage 11 — CI/CD pipeline (GitHub Actions)
+
+**Asked for:** a CI/CD pipeline that runs backend and frontend tests in
+parallel, builds the Docker Compose stack and runs integration/e2e tests
+against it, deploys to AWS using a GitHub OIDC role, and validates the
+deploy via the health endpoint.
+
+Before writing anything, I needed two things only you could supply: the
+GitHub org/repo (`Crooked-Cat-Tail-Software/snake-arena`, for scoping the
+OIDC trust policy to this repo specifically — a role that trusted any
+GitHub repo would let anyone's workflow assume it), and whether the AWS
+deploy step should run automatically on every push to `main` or only on
+manual trigger. You chose manual-only, which matches this project's cost
+profile (see `infra/aws/README.md`'s cost estimate) — an automatic
+deploy on every merge would start accruing AWS costs the moment this
+pipeline merged, not just when you actually meant to deploy.
+
+**AI produced:**
+- `.github/workflows/ci-cd.yaml` (new) — four jobs. `backend-tests` and
+  `frontend-tests` run in parallel (no `needs:` between them) against a
+  Postgres service container, running the same two suites `README.md`
+  documents (`tests/` minus `frontend/`/`integration/`, and
+  `tests/frontend/`). `docker-compose-integration-tests` runs
+  `tests/integration/` — a real `docker compose build`/`up` plus the
+  integration and browser-driven end-to-end tests already in that suite
+  — gated behind the first two passing, since it's by far the most
+  expensive job (a full Docker image build) and there's no reason to pay
+  for it if something cheaper already failed. `deploy` only exists on a
+  manual "Run workflow" click (`if: github.event_name ==
+  'workflow_dispatch'`) — a plain push or PR runs the first three jobs
+  and stops there. It authenticates via `aws-actions/configure-aws-credentials`
+  using OIDC (`permissions: id-token: write`, no stored AWS keys
+  anywhere in the repo or its secrets), runs the existing `deploy.sh`
+  unchanged, then polls `/api/health` on the resulting app URL for up to
+  5 minutes before failing the job if it never comes up healthy.
+- `infra/aws/00-github-oidc.yaml` (new) — a CloudFormation stack, deployed
+  once by you (not by the pipeline — nothing can authenticate to deploy
+  this stack until it exists), that creates the GitHub OIDC identity
+  provider (or reuses an existing one via an `ExistingOIDCProviderArn`
+  parameter, since AWS allows only one per account per provider URL) and
+  an IAM role GitHub Actions can assume. The trust policy's `sub`
+  condition restricts it to `repo:<org>/<repo>:ref:refs/heads/main`
+  specifically — a workflow run on any other branch, or a pull request
+  from a fork, is refused by AWS itself before the workflow file even
+  runs. The permissions policy is scoped to exactly what `deploy.sh`
+  needs: push to this project's ECR repo, create/update the two existing
+  CloudFormation stacks, and manage the one IAM role
+  (`snake-arena-ecs-execution-role`) those stacks create — nothing
+  broader. The VPC/RDS/ECS/ALB create actions use `Resource: "*"`
+  because AWS doesn't support resource-level ARN restrictions for most
+  of those services' create actions (the resource doesn't exist yet to
+  have an ARN); this is the same shape of access a person running
+  `deploy.sh` by hand already needs, not wider.
+- `backend/app/database.py` — unchanged this stage.
+- `infra/aws/deploy.sh`, `infra/aws/teardown.sh` — fixed the default
+  Region from `us-east-1` to `us-east-2`. This wasn't part of what was
+  asked for, but the AWS Agent Toolkit setup earlier in this project
+  revealed `us-east-2` is this account's actual assigned Region under
+  the "new AWS experience" account type, and the "new AWS experience"
+  rules are explicit that regional resources can't be created outside
+  that assigned Region — so the original `us-east-1` default would have
+  failed on this account. Flagged and fixed rather than left silently
+  wrong now that it's known to matter.
+- `infra/aws/README.md` — new "CI/CD (GitHub Actions)" section: the
+  one-time setup (deploy `00-github-oidc.yaml`, copy its output ARN into
+  a GitHub Actions repository variable), what the deploy role can and
+  can't do, and how to trigger a deploy. Also updated the Region
+  defaults and cost-estimate caveat to match the `deploy.sh` fix above.
+- `README.md`, `AGENTS.md` — new CI/CD status entries and repo-layout
+  line for `.github/workflows/`.
+
+**Verification actually performed:** the same fundamental limitation as
+Stages 9 and 10 — no way to execute a GitHub Actions run, exchange an
+OIDC token, or otherwise touch the real AWS control plane from this
+session. What I verified instead:
+- `00-github-oidc.yaml` passes `cfn-lint` with **zero errors or
+  warnings**.
+- `ci-cd.yaml` passes `actionlint` (installed fresh from its GitHub
+  releases for this check) with **zero findings** — this validates the
+  workflow's YAML and expression syntax, every `uses:` action reference,
+  and shellchecks every embedded `run:` script.
+- The GitHub/AWS-documented OIDC thumbprint was looked up via live web
+  search against GitHub's own changelog and AWS's security blog, not
+  recalled from training data — present-day infrastructure values like
+  this are exactly what's prone to silently going stale. My first
+  recollection was actually wrong (missing a trailing character, 39 hex
+  digits instead of the required 40) and `cfn-lint`'s own schema check
+  on the `ThumbprintList` property caught it immediately; I then
+  verified the corrected value against two independent official sources
+  before using it, rather than just patching the length.
+- `deploy.sh`/`teardown.sh` still pass `shellcheck` cleanly and `bash
+  -n` after the Region-default edit; re-ran `cfn-lint` on `01-ecr.yaml`/
+  `02-app.yaml` as a regression check (unaffected, unsurprisingly, since
+  neither file changed) — zero errors, same as before.
+- The IAM role's resource names (the ECS execution role name, the ECR
+  repository name, the two stack names) were taken directly from reading
+  the actual `01-ecr.yaml`/`02-app.yaml` files rather than recalled from
+  memory of writing them in Stage 10, so the new template's scoping
+  matches what those templates actually create.
+
+None of that proves the pipeline will actually go green on GitHub:
+whether the Postgres service container comes up in time for the tests,
+whether `playwright install --with-deps chromium` behaves the same on a
+GitHub-hosted runner as it does locally, whether the OIDC token exchange
+actually succeeds against a real AWS account, and whether the deploy
+job's health-check polling behaves correctly against a real ALB are all
+untested by anything available to me.
+
+**Human review:** pending — push this to GitHub, do the one-time OIDC
+role deploy from `infra/aws/README.md`'s CI/CD section yourself (it
+needs your own AWS credentials, same reasoning as every AWS-touching
+step in this project), add the `AWS_DEPLOY_ROLE_ARN` repository
+variable, and treat the first automatic push-triggered test run and the
+first manual "Run workflow" deploy click as the real tests. I'd also
+specifically want your eyes on the IAM policy in `00-github-oidc.yaml`
+before trusting it with real AWS access — I'm confident in its scoping
+logic, but least-privilege IAM policies are exactly the kind of thing
+where a second pair of eyes matters most and mine have never seen it
+actually enforced against a live account.
