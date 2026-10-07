@@ -64,6 +64,16 @@ Parameters:
     Default: 1
     Description: Number of running copies of the app. 1 is enough for a class exercise; the leaderboard lives in RDS, not in the container, so this can scale later without code changes.
 
+  DBDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      "false" for dev (meant to be torn down between sessions). "true"
+      for production -- RDS then refuses to delete the database (the
+      leaderboard), even via a stack delete, until this is set back to
+      "false" on purpose. deploy.sh's third argument sets this.
+
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
@@ -249,10 +259,9 @@ Resources:
       PubliclyAccessible: false
       MultiAZ: false
       BackupRetentionPeriod: 7
-      # DeletionProtection is off on purpose -- this is a class exercise
-      # meant to be torn down between sessions (see teardown.sh), not a
-      # production database. Turn it on if that stops being true.
-      DeletionProtection: false
+      # Off for dev (torn down between sessions, see teardown.sh), on
+      # for production -- see the DBDeletionProtection parameter.
+      DeletionProtection: !Ref DBDeletionProtection
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-db"
@@ -305,6 +314,10 @@ Resources:
       Cpu: !Ref ContainerCpu
       Memory: !Ref ContainerMemory
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      # Must match the platform deploy.sh builds the image for.
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
       ContainerDefinitions:
         - Name: !Ref ProjectName
           Image: !Ref ImageUri

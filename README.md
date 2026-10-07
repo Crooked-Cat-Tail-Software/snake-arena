@@ -289,7 +289,7 @@ credentials.
 ## CI/CD
 
 `.github/workflows/ci-cd.yaml` runs the backend and frontend/e2e test
-suites in parallel on every push/PR to `main`, then the Docker Compose
+suites in parallel on every push/PR to `master`, then the Docker Compose
 integration suite if both pass. A separate, manually-triggered job
 deploys to AWS via a keyless GitHub OIDC role and checks `/api/health`
 to confirm the deploy actually came up healthy. See [infra/aws/README.md's

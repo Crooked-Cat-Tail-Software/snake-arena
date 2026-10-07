@@ -140,11 +140,49 @@ name or region:
 ./teardown.sh <project-name> <aws-region>   # defaults: snake-arena, us-east-2
 ```
 
+## Environments: dev and prod
+
+There are two independent copies of this infrastructure in the same
+AWS project and Region, told apart only by the project name passed to
+`deploy.sh`:
+
+| | Dev | Prod |
+|---|---|---|
+| Project name | `snake-arena` | `snake-arena-prod` |
+| Stacks | `snake-arena-ecr`, `snake-arena-app` | `snake-arena-prod-ecr`, `snake-arena-prod-app` |
+| RDS deletion protection | off (tear down freely) | **on** |
+| CI deploy role stack | `snake-arena-github-oidc` | `snake-arena-prod-github-oidc` |
+| GitHub variable | repo variable `AWS_DEPLOY_ROLE_ARN` | `production` environment variable `AWS_PROD_DEPLOY_ROLE_ARN` |
+
+Each has its own VPC, database (and leaderboard data), ECR repository,
+load balancer URL, and ECS execution role -- nothing is shared, so a dev
+deploy or teardown never touches prod. Prod doubles the running cost in
+the "Cost" section below while it's up.
+
+Deploy prod by hand:
+
+```bash
+./deploy.sh snake-arena-prod us-east-2 true
+```
+
+The `true` turns on RDS deletion protection; always pass it for prod
+(leaving it off on a later run would switch protection back off).
+`./teardown.sh snake-arena-prod us-east-2` refuses to run while
+protection is on -- see its message for how to deliberately turn it off.
+
+**Same-account trade-off:** both environments live in one AWS account,
+so dev and prod share billing and the spend limit, and the dev deploy
+role's broad VPC/RDS/ECS/ALB permissions (see "What the deploy role can
+and can't do" below) technically reach prod resources too. Deletion
+protection guards the prod database against that. For full isolation,
+prod could move to its own project in AWS Settings later; the
+templates work unchanged there.
+
 ## CI/CD (GitHub Actions)
 
 `.github/workflows/ci-cd.yaml` runs backend tests and frontend/e2e
 (Playwright) tests in parallel on every push and pull request against
-`main`, then -- if both pass -- builds and runs the Docker Compose
+`master`, then -- if both pass -- builds and runs the Docker Compose
 integration/e2e suite (`tests/integration/`) for real. None of that
 needs AWS access.
 
@@ -157,6 +195,15 @@ provider, not a stored access key.
 
 ### One-time setup (you do this, not the pipeline)
 
+> **Blocked on this AWS project as it stands.** The managed paid-plan
+> service control policy for the "new AWS experience" denies every
+> `iam:*Provider*` action, so `00-github-oidc.yaml` can't create the
+> GitHub OIDC provider (`AccessDenied ... explicit deny in a service
+> control policy`) -- this is why `snake-arena-github-oidc` rolled back
+> on 2026-09-24. Per AWS's docs that policy is lifted by **activating
+> advanced features** in AWS Settings. Until then, deploy dev and prod
+> by running `deploy.sh` locally; the CI test jobs are unaffected.
+
 1. **Deploy the OIDC role** — this has to exist before the pipeline can
    authenticate at all, so it's a separate template you deploy yourself,
    the same way as `01-ecr.yaml`/`02-app.yaml`:
@@ -165,7 +212,7 @@ provider, not a stored access key.
    aws cloudformation deploy \
      --stack-name snake-arena-github-oidc \
      --template-file 00-github-oidc.yaml \
-     --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena GitHubBranch=main \
+     --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena GitHubBranch=master \
      --capabilities CAPABILITY_NAMED_IAM \
      --region us-east-2
    ```
@@ -200,8 +247,47 @@ provider, not a stored access key.
    this exact repo and branch.
 
 3. **Trigger a deploy.** Actions tab → "CI/CD" workflow → "Run workflow"
-   → pick the `main` branch → Run. Watch the `deploy` job's logs for the
-   app URL and the health-check result.
+   → pick the `master` branch and target `dev` → Run. Watch the `deploy`
+   job's logs for the app URL and the health-check result.
+
+### One-time setup for prod deploys
+
+The **deploy-prod** job (target `prod` in "Run workflow") uses its own
+deploy role, scoped to the `snake-arena-prod-*` resources, and runs in
+a GitHub Environment named `production` that requires approval.
+
+1. **Deploy the prod OIDC role.** Reuse the GitHub OIDC provider the dev
+   stack already created (AWS allows only one per account):
+
+   ```bash
+   OIDC_ARN=$(aws cloudformation describe-stacks \
+     --stack-name snake-arena-github-oidc --region us-east-2 \
+     --query "Stacks[0].Outputs[?OutputKey=='OIDCProviderArn'].OutputValue" \
+     --output text)
+   aws cloudformation deploy \
+     --stack-name snake-arena-prod-github-oidc \
+     --template-file 00-github-oidc.yaml \
+     --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena \
+       ProjectName=snake-arena-prod GitHubEnvironment=production \
+       ExistingOIDCProviderArn="$OIDC_ARN" \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --region us-east-2
+   ```
+
+   With `GitHubEnvironment=production`, the role trusts only jobs that
+   run in the `production` environment, not branch runs in general.
+
+2. **Create the `production` environment in GitHub.** Settings →
+   Environments → New environment → `production`. Then:
+   - **Required reviewers:** add yourself (or whoever approves prod
+     releases). Every prod deploy then pauses until one of them approves.
+   - **Deployment branches and tags:** "Selected branches" → `master`, so
+     only `master` can ever be deployed to prod.
+   - **Environment variables:** add `AWS_PROD_DEPLOY_ROLE_ARN` with the
+     `DeployRoleArn` output of `snake-arena-prod-github-oidc`.
+
+3. **Trigger a prod deploy.** "Run workflow" → branch `master`, target
+   `prod` → Run, then approve it when GitHub asks.
 
 ### What the deploy role can and can't do
 
@@ -216,7 +302,7 @@ resource-level restrictions for most of those services' *create*
 actions (the resource doesn't exist yet to have an ARN) — this is the
 same shape of access you already need yourself to run `deploy.sh` by
 hand, not anything wider. The trust policy on top of that only accepts
-a token whose `sub` claim is `repo:<org>/<repo>:ref:refs/heads/main` --
+a token whose `sub` claim is `repo:<org>/<repo>:ref:refs/heads/master` --
 a workflow run on any other branch, or a pull request from a fork, is
 refused by AWS before anything in the workflow even executes.
 

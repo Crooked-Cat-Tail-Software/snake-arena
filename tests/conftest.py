@@ -21,7 +21,6 @@ from sqlalchemy.orm import sessionmaker
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app.main import app  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 
 TEST_DATABASE_URL = os.environ.get(
@@ -36,6 +35,13 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 @pytest.fixture()
 def client():
     """A TestClient wired to a real Postgres database, reset before each test."""
+    # Imported here, not at module level: app.main connects to Postgres on
+    # import (create_all), and pytest loads this conftest for every test
+    # under tests/ -- including tests/integration/, which has no database
+    # until its own `docker compose up` (and needs host port 5432 free
+    # for it, so CI can't give it one up front).
+    from app.main import app
+
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
