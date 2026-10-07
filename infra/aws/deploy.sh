@@ -14,9 +14,10 @@ set -euo pipefail
 # Dev and production are two independent copies of the same stacks,
 # told apart only by project name:
 #   ./deploy.sh                                     # dev  (snake-arena-*)
-#   ./deploy.sh snake-arena-prod us-east-2 true     # prod (snake-arena-prod-*)
-# The third argument turns on RDS deletion protection -- always pass
-# "true" for prod. (Region defaults to us-east-2 because that's this
+#   ./deploy.sh snake-arena-prod us-east-2 true     # prod, FIRST CREATION ONLY
+# After prod exists, update it only with ./promote.sh, which ships the
+# image dev is running instead of rebuilding. The third argument turns on
+# RDS deletion protection -- always pass "true" for prod. (Region defaults to us-east-2 because that's this
 # project's assigned Region under the new AWS experience account type --
 # see ~/.claude/CLAUDE.md's AWS Agent Toolkit rules if that applies to
 # you. Pass a different Region explicitly if yours differs.)

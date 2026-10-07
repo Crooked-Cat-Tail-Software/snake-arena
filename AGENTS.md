@@ -29,10 +29,11 @@ snake-arena/
 │   └── integration/          # pytest — runs real `docker compose build`/`up`
 ├── pytest.ini                # registers the `integration` marker
 ├── infra/
-│   └── aws/                  # CloudFormation templates + deploy/teardown scripts
+│   └── aws/                  # CloudFormation + deploy/promote/teardown scripts
 ├── .github/
 │   └── workflows/
-│       └── ci-cd.yaml         # tests in CI; manually-triggered AWS deploy job
+│       ├── ci-cd.yaml         # tests in CI; manually-triggered dev deploy job
+│       └── promote.yaml       # manual: promote dev's running image to prod
 └── docs/
     └── ai-usage-report.md    # Log of how AI was used across this project
 ```

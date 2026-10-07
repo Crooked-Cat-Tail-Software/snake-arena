@@ -50,6 +50,15 @@ Parameters:
       the environment to the master branch in GitHub's settings too --
       see infra/aws/README.md.
 
+  PromoteFromProjectName:
+    Type: String
+    Default: ""
+    Description: >
+      Leave blank for dev. For the prod deploy role, set to the dev
+      project name ("snake-arena") so .github/workflows/promote.yaml can
+      read dev's stack and pull dev's image to promote it -- read-only
+      access to dev; this role still can't change anything in dev.
+
   ProjectName:
     Type: String
     Default: snake-arena
@@ -75,6 +84,7 @@ Parameters:
 Conditions:
   CreateOIDCProvider: !Equals [!Ref ExistingOIDCProviderArn, ""]
   UseGitHubEnvironment: !Not [!Equals [!Ref GitHubEnvironment, ""]]
+  PromoteFromSource: !Not [!Equals [!Ref PromoteFromProjectName, ""]]
 
 Resources:
   GitHubOIDCProvider:
@@ -146,6 +156,27 @@ Resources:
                   - ecr:PutImageScanningConfiguration
                   - ecr:TagResource
                 Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}"
+
+              # --- Promotion (prod role only, see PromoteFromProjectName):
+              # read dev's stack to find its image and health URL, and
+              # pull that image. Read-only on dev. ---
+              - !If
+                - PromoteFromSource
+                - Sid: PromoteReadSourceImage
+                  Effect: Allow
+                  Action:
+                    - ecr:BatchGetImage
+                    - ecr:GetDownloadUrlForLayer
+                    - ecr:BatchCheckLayerAvailability
+                  Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${PromoteFromProjectName}"
+                - !Ref AWS::NoValue
+              - !If
+                - PromoteFromSource
+                - Sid: PromoteReadSourceStack
+                  Effect: Allow
+                  Action: cloudformation:DescribeStacks
+                  Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PromoteFromProjectName}-app/*"
+                - !Ref AWS::NoValue
 
               # --- CloudFormation: deploy.sh's two `aws cloudformation
               # deploy` calls, which under the hood create/execute a

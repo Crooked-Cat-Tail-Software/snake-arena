@@ -159,14 +159,33 @@ load balancer URL, and ECS execution role -- nothing is shared, so a dev
 deploy or teardown never touches prod. Prod doubles the running cost in
 the "Cost" section below while it's up.
 
-Deploy prod by hand:
+### Promoting dev to prod
+
+Prod is never built from source. It only ever runs an image that has
+already run in dev ("build once, promote"):
+
+1. Deploy dev and test it: `./deploy.sh`
+2. Promote exactly what dev is running: `./promote.sh` (or the
+   **"Promote dev to prod"** GitHub Actions workflow, see below)
+3. Tear dev back down when you're done: `./teardown.sh`
+
+`promote.sh` reads the image dev's stack runs, refuses to continue
+unless dev's `/api/health` passes, copies that image into prod's ECR
+repository under the same tag (no rebuild), updates the prod stack to
+run it, and polls prod's `/api/health`. Dev has to be up while you
+promote -- `teardown.sh` deletes dev's ECR repository, so there's
+nothing to promote while dev is down. Note that the prod stack is
+updated with this checkout's `02-app.yaml`, so any template changes are
+promoted along with the image.
+
+The only time prod is built from source is its very first creation:
 
 ```bash
 ./deploy.sh snake-arena-prod us-east-2 true
 ```
 
-The `true` turns on RDS deletion protection; always pass it for prod
-(leaving it off on a later run would switch protection back off).
+The `true` turns on RDS deletion protection (`promote.sh` always keeps
+it on).
 `./teardown.sh snake-arena-prod us-east-2` refuses to run while
 protection is on -- see its message for how to deliberately turn it off.
 
@@ -247,14 +266,15 @@ provider, not a stored access key.
    this exact repo and branch.
 
 3. **Trigger a deploy.** Actions tab → "CI/CD" workflow → "Run workflow"
-   → pick the `master` branch and target `dev` → Run. Watch the `deploy`
+   → pick the `master` branch → Run (this deploys dev only). Watch the `deploy`
    job's logs for the app URL and the health-check result.
 
-### One-time setup for prod deploys
+### One-time setup for promoting to prod
 
-The **deploy-prod** job (target `prod` in "Run workflow") uses its own
-deploy role, scoped to the `snake-arena-prod-*` resources, and runs in
-a GitHub Environment named `production` that requires approval.
+`.github/workflows/promote.yaml` ("Promote dev to prod") runs
+`promote.sh` with its own deploy role, scoped to the `snake-arena-prod-*`
+resources plus read-only access to dev's image and stack, in a GitHub
+Environment named `production` that requires approval.
 
 1. **Deploy the prod OIDC role.** Reuse the GitHub OIDC provider the dev
    stack already created (AWS allows only one per account):
@@ -269,6 +289,7 @@ a GitHub Environment named `production` that requires approval.
      --template-file 00-github-oidc.yaml \
      --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena \
        ProjectName=snake-arena-prod GitHubEnvironment=production \
+       PromoteFromProjectName=snake-arena \
        ExistingOIDCProviderArn="$OIDC_ARN" \
      --capabilities CAPABILITY_NAMED_IAM \
      --region us-east-2
@@ -276,6 +297,8 @@ a GitHub Environment named `production` that requires approval.
 
    With `GitHubEnvironment=production`, the role trusts only jobs that
    run in the `production` environment, not branch runs in general.
+   `PromoteFromProjectName=snake-arena` adds read-only access to dev's
+   ECR repository and app stack, so it can find and pull dev's image.
 
 2. **Create the `production` environment in GitHub.** Settings →
    Environments → New environment → `production`. Then:
@@ -286,8 +309,9 @@ a GitHub Environment named `production` that requires approval.
    - **Environment variables:** add `AWS_PROD_DEPLOY_ROLE_ARN` with the
      `DeployRoleArn` output of `snake-arena-prod-github-oidc`.
 
-3. **Trigger a prod deploy.** "Run workflow" → branch `master`, target
-   `prod` → Run, then approve it when GitHub asks.
+3. **Promote.** With dev deployed and tested: Actions tab → "Promote
+   dev to prod" → "Run workflow" → branch `master` → Run, then approve
+   it when GitHub asks.
 
 ### What the deploy role can and can't do
 

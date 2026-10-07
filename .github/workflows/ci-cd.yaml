@@ -12,24 +12,16 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
-  workflow_dispatch:
-    inputs:
-      target:
-        description: Which environment to deploy to
-        type: choice
-        options: [dev, prod]
-        default: dev
+  workflow_dispatch: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Dev and prod are two independent copies of the same stacks (see
-  # infra/aws/README.md's "Environments" section), told apart only by
-  # project name.
+  # Deploys dev only. Prod is never built from source -- it only gets
+  # images already running in dev, via .github/workflows/promote.yaml.
   PROJECT_NAME: snake-arena
-  PROD_PROJECT_NAME: snake-arena-prod
   # This project's assigned Region under the AWS "new experience"
   # account type -- see infra/aws/deploy.sh's comment. Override here
   # (and the AWS_DEPLOY_ROLE_ARN variable's account) if that doesn't
@@ -201,7 +193,7 @@ jobs:
     name: Deploy to AWS (dev)
     runs-on: ubuntu-latest
     needs: [docker-compose-integration-tests]
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'dev'
+    if: github.event_name == 'workflow_dispatch'
     # Required for GitHub's OIDC token to be minted for this job --
     # without this, aws-actions/configure-aws-credentials has nothing
     # to present to AWS.
@@ -237,67 +229,6 @@ jobs:
         # The ALB's target group can take a minute or two after the
         # stack finishes for health checks to start passing (see
         # infra/aws/README.md) -- poll instead of checking once.
-        run: |
-          health_url="${{ steps.app_url.outputs.url }}/api/health"
-          echo "Polling $health_url ..."
-          for i in $(seq 1 30); do
-            if curl -fsS --max-time 5 "$health_url"; then
-              echo
-              echo "Healthy after ${i} attempt(s)."
-              exit 0
-            fi
-            echo "Not ready yet (attempt $i/30) -- waiting 10s..."
-            sleep 10
-          done
-          echo "::error::$health_url never returned a healthy response after 5 minutes"
-          exit 1
-
-  # --- Production: same steps as the dev deploy above, against the
-  # separate snake-arena-prod-* stacks. Runs in the "production" GitHub
-  # Environment, so it waits for that environment's required reviewers
-  # to approve before it starts -- and the prod deploy role (deployed
-  # from 00-github-oidc.yaml with GitHubEnvironment=production) trusts
-  # only jobs in that environment, so nothing else can assume it. ---
-  deploy-prod:
-    name: Deploy to AWS (prod)
-    runs-on: ubuntu-latest
-    needs: [docker-compose-integration-tests]
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'
-    environment:
-      name: production
-      url: ${{ steps.app_url.outputs.url }}
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC, no stored keys)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          # Set as a variable on the "production" environment (not the
-          # repo), so only this job can see it -- see infra/aws/README.md.
-          role-to-assume: ${{ vars.AWS_PROD_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy ECR + app stacks
-        # Third argument turns on RDS deletion protection for prod.
-        run: |
-          chmod +x infra/aws/deploy.sh
-          infra/aws/deploy.sh "$PROD_PROJECT_NAME" "$AWS_REGION" true
-
-      - name: Get the app URL
-        id: app_url
-        run: |
-          url=$(aws cloudformation describe-stacks \
-            --stack-name "${PROD_PROJECT_NAME}-app" \
-            --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" \
-            --output text)
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "Deployed: $url"
-
-      - name: Validate deploy via the health endpoint
         run: |
           health_url="${{ steps.app_url.outputs.url }}/api/health"
           echo "Polling $health_url ..."
