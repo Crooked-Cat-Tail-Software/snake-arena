@@ -56,13 +56,20 @@ REPO_NAME=$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='RepositoryName'].OutputValue" \
   --output text)
-IMAGE_IDS=$(aws ecr list-images --repository-name "$REPO_NAME" --region "$AWS_REGION" --query 'imageIds[*]' --output json)
+# Loop: each pushed image is a multi-platform index plus the manifests
+# it points to (the amd64 image and a build attestation), and ECR only
+# deletes those child manifests once the index referencing them is gone
+# -- so a single pass leaves images behind and the stack delete fails.
+for _ in 1 2 3 4 5; do
+  IMAGE_IDS=$(aws ecr list-images --repository-name "$REPO_NAME" --region "$AWS_REGION" --query 'imageIds[*]' --output json)
+  [ "$IMAGE_IDS" = "[]" ] && break
+  aws ecr batch-delete-image --repository-name "$REPO_NAME" --region "$AWS_REGION" --image-ids "$IMAGE_IDS" --output json >/dev/null
+done
 if [ "$IMAGE_IDS" != "[]" ]; then
-  aws ecr batch-delete-image --repository-name "$REPO_NAME" --region "$AWS_REGION" --image-ids "$IMAGE_IDS" >/dev/null
-  echo "Deleted all images in $REPO_NAME."
-else
-  echo "Repository already empty."
+  echo "Couldn't empty $REPO_NAME after 5 passes -- check it in the ECR console."
+  exit 1
 fi
+echo "Repository $REPO_NAME is empty."
 echo
 
 echo "--> Deleting ECR stack..."
