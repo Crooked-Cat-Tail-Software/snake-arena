@@ -894,3 +894,10 @@ scripts), and `actionlint` (the workflow) all pass with zero findings.
 - The repo's default branch is `master`, but `ci-cd.yaml` triggered only
   on `main` (so CI never ran on push), and the OIDC template/README
   assumed `main` too. Switched those to `master`.
+- The PR's first real CI run: backend and frontend jobs passed (confirming
+  the SQLAlchemy pin), but the Docker Compose integration job failed at
+  collection -- pytest loads `tests/conftest.py` for `tests/integration/`
+  too, and its module-level `from app.main import app` connects to
+  Postgres on import, before the suite's own `docker compose up`. Moved
+  that import into the `client` fixture. Verified: integration suite now
+  collects (4 tests) with no Postgres running; backend suite still 9/9.
