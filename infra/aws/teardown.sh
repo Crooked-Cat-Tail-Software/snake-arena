@@ -15,6 +15,24 @@ AWS_REGION="${2:-us-east-2}"
 
 command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and run 'aws configure' first."; exit 1; }
 
+# A stack delete against a deletion-protected database (production --
+# see deploy.sh's third argument) would delete the ALB and ECS service
+# first and only then fail on RDS, leaving prod down and the stack in
+# DELETE_FAILED. Refuse up front instead, before touching anything.
+DB_PROTECTED=$(aws rds describe-db-instances \
+  --db-instance-identifier "${PROJECT_NAME}-db" \
+  --region "$AWS_REGION" \
+  --query 'DBInstances[0].DeletionProtection' \
+  --output text 2>/dev/null || echo "None")
+if [ "$DB_PROTECTED" = "True" ]; then
+  echo "${PROJECT_NAME}-db has RDS deletion protection on (production)."
+  echo "Nothing was deleted. If you really mean to delete it, redeploy with"
+  echo "deletion protection off first:"
+  echo "  ./deploy.sh $PROJECT_NAME $AWS_REGION false"
+  echo "then run this script again."
+  exit 1
+fi
+
 echo "This will DELETE the ${PROJECT_NAME}-app stack, including its RDS"
 echo "database and all data in it (the leaderboard), and then the"
 echo "${PROJECT_NAME}-ecr repository and every image in it."

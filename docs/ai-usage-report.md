@@ -836,3 +836,58 @@ before trusting it with real AWS access — I'm confident in its scoping
 logic, but least-privilege IAM policies are exactly the kind of thing
 where a second pair of eyes matters most and mine have never seen it
 actually enforced against a live account.
+
+## Stage 12 — Separate production environment
+
+**Asked:** create a second, independent copy of the AWS infrastructure
+to use as production, keeping the existing one as dev.
+
+**Decisions (made by the human when asked):** prod lives in the same
+AWS project/Region as dev, as separate `snake-arena-prod-*` stacks
+(rather than a separate AWS Settings project); prod CI deploys go
+through a GitHub Environment (`production`) with required approval; the
+prod database gets RDS deletion protection (no Multi-AZ, no forced final
+snapshot).
+
+**Generated/changed:**
+- `02-app.yaml` — new `DBDeletionProtection` parameter (default
+  `"false"`, so dev is unchanged).
+- `deploy.sh` — optional third argument passes that parameter through.
+- `teardown.sh` — refuses to start if the database is deletion-
+  protected, so a teardown attempt can't take prod's ALB/ECS down and
+  then fail halfway on RDS.
+- `00-github-oidc.yaml` — new optional `GitHubEnvironment` parameter:
+  when set, the role trusts `repo:<org>/<repo>:environment:<name>`
+  instead of the branch `sub` claim. Blank (the default) keeps dev's
+  existing trust policy byte-for-byte. Inline policy name now derives
+  from `ProjectName` (still `snake-arena-deploy` for dev).
+- `ci-cd.yaml` — "Run workflow" now takes a `target` (dev/prod). Dev's
+  deploy job is unchanged and deliberately stays outside any GitHub
+  Environment, so its OIDC `sub` claim — and therefore the existing dev
+  role — keeps working with no redeploy. A new `deploy-prod` job runs in
+  the `production` environment with its own role ARN variable.
+- `infra/aws/README.md` — new "Environments" section and prod one-time
+  setup steps.
+
+**Verified:** `cfn-lint` (all three templates), `shellcheck` (both
+scripts), and `actionlint` (the workflow) all pass with zero findings.
+
+**First real deploy — found and fixed while deploying prod (2026-10-07):**
+- The dev stack (`snake-arena-app`) had actually rolled back on
+  2026-09-24 ("Service ... NotStabilized"): the image was built on an
+  Apple Silicon Mac as arm64, and Fargate runs x86_64. Fixed by building
+  with `--platform linux/amd64` in `deploy.sh` and pinning
+  `RuntimePlatform: X86_64` in `02-app.yaml`'s task definition.
+- Once tasks started, the container crashed on import: a fresh build
+  pulled SQLAlchemy 2.1, which changed the default `postgresql://`
+  driver to `psycopg` (v3), but the image only ships `psycopg2`. Pinned
+  `sqlalchemy>=2.0,<2.1` in `backend/requirements.txt` (the version the
+  suite was verified against); migrating to psycopg 3 is a candidate
+  follow-up. This would also have broken Docker Compose and CI on their
+  next fresh install. The fixed image was pushed over the in-flight
+  stack's image tag so the create could complete instead of rolling back
+  (a rollback would have failed on the deletion-protected database).
+- `snake-arena-github-oidc` had also rolled back: the managed paid-plan
+  SCP denies `iam:*Provider*`, so the GitHub OIDC provider can't be
+  created without activating advanced features in AWS Settings.
+  Documented in `infra/aws/README.md`.

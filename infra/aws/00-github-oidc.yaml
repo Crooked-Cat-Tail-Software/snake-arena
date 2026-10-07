@@ -37,6 +37,19 @@ Parameters:
       refused by AWS itself, before anything in the workflow file even
       runs.
 
+  GitHubEnvironment:
+    Type: String
+    Default: ""
+    Description: >
+      Leave blank for dev: the role trusts workflow runs on
+      GitHubBranch. Set to "production" for the prod deploy role: the
+      role then trusts only jobs that run in that GitHub Environment
+      (GitHub puts the environment, not the branch, in the token's
+      `sub` claim for those jobs), so a prod deploy is only possible
+      after that environment's required reviewers approve it. Restrict
+      the environment to the main branch in GitHub's settings too --
+      see infra/aws/README.md.
+
   ProjectName:
     Type: String
     Default: snake-arena
@@ -61,6 +74,7 @@ Parameters:
 
 Conditions:
   CreateOIDCProvider: !Equals [!Ref ExistingOIDCProviderArn, ""]
+  UseGitHubEnvironment: !Not [!Equals [!Ref GitHubEnvironment, ""]]
 
 Resources:
   GitHubOIDCProvider:
@@ -98,12 +112,16 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 # Only a workflow run against this exact branch of this
-                # exact repo can assume this role -- a pull request from
-                # a fork, or a push to any other branch, presents a
+                # exact repo (or, for prod, a job in this exact GitHub
+                # Environment) can assume this role -- a pull request
+                # from a fork, or a push to any other branch, presents a
                 # different `sub` claim and is refused.
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}"
+                token.actions.githubusercontent.com:sub: !If
+                  - UseGitHubEnvironment
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:${GitHubEnvironment}"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}"
       Policies:
-        - PolicyName: snake-arena-deploy
+        - PolicyName: !Sub "${ProjectName}-deploy"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:

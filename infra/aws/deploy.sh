@@ -8,20 +8,29 @@ set -euo pipefail
 # this directory for the full picture, a cost estimate, and how to tear
 # it back down when you're done (./teardown.sh).
 #
-# Usage: ./deploy.sh [project-name] [aws-region]
-# Defaults: snake-arena, us-east-2 (us-east-2 because that's this
+# Usage: ./deploy.sh [project-name] [aws-region] [db-deletion-protection]
+# Defaults: snake-arena, us-east-2, false
+#
+# Dev and production are two independent copies of the same stacks,
+# told apart only by project name:
+#   ./deploy.sh                                     # dev  (snake-arena-*)
+#   ./deploy.sh snake-arena-prod us-east-2 true     # prod (snake-arena-prod-*)
+# The third argument turns on RDS deletion protection -- always pass
+# "true" for prod. (Region defaults to us-east-2 because that's this
 # project's assigned Region under the new AWS experience account type --
 # see ~/.claude/CLAUDE.md's AWS Agent Toolkit rules if that applies to
 # you. Pass a different Region explicitly if yours differs.)
 
 PROJECT_NAME="${1:-snake-arena}"
 AWS_REGION="${2:-us-east-2}"
+DB_DELETION_PROTECTION="${3:-false}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 IMAGE_TAG="$(date +%Y%m%d%H%M%S)"
 
 echo "== Snake Arena AWS deploy =="
 echo "Project: $PROJECT_NAME   Region: $AWS_REGION   Image tag: $IMAGE_TAG"
+echo "DB deletion protection: $DB_DELETION_PROTECTION"
 echo
 
 command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and run 'aws configure' first."; exit 1; }
@@ -43,7 +52,11 @@ echo "ECR repository: $REPO_URI"
 echo
 
 echo "--> [2/5] Building the image (this is the same Dockerfile 'docker compose build' uses)..."
-docker build -t "${PROJECT_NAME}:${IMAGE_TAG}" "$REPO_ROOT"
+# Fargate runs x86_64 (see RuntimePlatform in 02-app.yaml). Without an
+# explicit platform, an Apple Silicon Mac builds an arm64 image that
+# Fargate can't start ("exec format error"), and the ECS service never
+# stabilizes.
+docker build --platform linux/amd64 -t "${PROJECT_NAME}:${IMAGE_TAG}" "$REPO_ROOT"
 docker tag "${PROJECT_NAME}:${IMAGE_TAG}" "${REPO_URI}:${IMAGE_TAG}"
 echo
 
@@ -60,6 +73,7 @@ aws cloudformation deploy \
   --stack-name "${PROJECT_NAME}-app" \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="${REPO_URI}:${IMAGE_TAG}" \
+    DBDeletionProtection="$DB_DELETION_PROTECTION" \
   --capabilities CAPABILITY_NAMED_IAM \
   --region "$AWS_REGION"
 echo
