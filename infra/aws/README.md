@@ -182,7 +182,7 @@ templates work unchanged there.
 
 `.github/workflows/ci-cd.yaml` runs backend tests and frontend/e2e
 (Playwright) tests in parallel on every push and pull request against
-`main`, then -- if both pass -- builds and runs the Docker Compose
+`master`, then -- if both pass -- builds and runs the Docker Compose
 integration/e2e suite (`tests/integration/`) for real. None of that
 needs AWS access.
 
@@ -212,7 +212,7 @@ provider, not a stored access key.
    aws cloudformation deploy \
      --stack-name snake-arena-github-oidc \
      --template-file 00-github-oidc.yaml \
-     --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena GitHubBranch=main \
+     --parameter-overrides GitHubOrg=Crooked-Cat-Tail-Software GitHubRepo=snake-arena GitHubBranch=master \
      --capabilities CAPABILITY_NAMED_IAM \
      --region us-east-2
    ```
@@ -247,7 +247,7 @@ provider, not a stored access key.
    this exact repo and branch.
 
 3. **Trigger a deploy.** Actions tab → "CI/CD" workflow → "Run workflow"
-   → pick the `main` branch and target `dev` → Run. Watch the `deploy`
+   → pick the `master` branch and target `dev` → Run. Watch the `deploy`
    job's logs for the app URL and the health-check result.
 
 ### One-time setup for prod deploys
@@ -281,12 +281,12 @@ a GitHub Environment named `production` that requires approval.
    Environments → New environment → `production`. Then:
    - **Required reviewers:** add yourself (or whoever approves prod
      releases). Every prod deploy then pauses until one of them approves.
-   - **Deployment branches and tags:** "Selected branches" → `main`, so
-     only `main` can ever be deployed to prod.
+   - **Deployment branches and tags:** "Selected branches" → `master`, so
+     only `master` can ever be deployed to prod.
    - **Environment variables:** add `AWS_PROD_DEPLOY_ROLE_ARN` with the
      `DeployRoleArn` output of `snake-arena-prod-github-oidc`.
 
-3. **Trigger a prod deploy.** "Run workflow" → branch `main`, target
+3. **Trigger a prod deploy.** "Run workflow" → branch `master`, target
    `prod` → Run, then approve it when GitHub asks.
 
 ### What the deploy role can and can't do
@@ -302,7 +302,7 @@ resource-level restrictions for most of those services' *create*
 actions (the resource doesn't exist yet to have an ARN) — this is the
 same shape of access you already need yourself to run `deploy.sh` by
 hand, not anything wider. The trust policy on top of that only accepts
-a token whose `sub` claim is `repo:<org>/<repo>:ref:refs/heads/main` --
+a token whose `sub` claim is `repo:<org>/<repo>:ref:refs/heads/master` --
 a workflow run on any other branch, or a pull request from a fork, is
 refused by AWS before anything in the workflow even executes.
 

@@ -891,3 +891,6 @@ scripts), and `actionlint` (the workflow) all pass with zero findings.
   SCP denies `iam:*Provider*`, so the GitHub OIDC provider can't be
   created without activating advanced features in AWS Settings.
   Documented in `infra/aws/README.md`.
+- The repo's default branch is `master`, but `ci-cd.yaml` triggered only
+  on `main` (so CI never ran on push), and the OIDC template/README
+  assumed `main` too. Switched those to `master`.

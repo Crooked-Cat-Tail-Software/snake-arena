@@ -30,7 +30,7 @@ Parameters:
 
   GitHubBranch:
     Type: String
-    Default: main
+    Default: master
     Description: >
       Only workflow runs triggered against this branch can assume the
       role -- a run on any other branch (or a fork's pull request) is
@@ -47,7 +47,7 @@ Parameters:
       (GitHub puts the environment, not the branch, in the token's
       `sub` claim for those jobs), so a prod deploy is only possible
       after that environment's required reviewers approve it. Restrict
-      the environment to the main branch in GitHub's settings too --
+      the environment to the master branch in GitHub's settings too --
       see infra/aws/README.md.
 
   ProjectName:

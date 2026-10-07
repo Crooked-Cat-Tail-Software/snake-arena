@@ -1,17 +1,17 @@
 name: CI/CD
 
-# Tests run on every push and pull request against main, same as any
+# Tests run on every push and pull request against master, same as any
 # normal CI. The deploy job is different: it only exists on a manual
 # "Run workflow" click (see the `if:` on the deploy job below) -- a
-# push to main never deploys anything to AWS by itself. That's a
+# push to master never deploys anything to AWS by itself. That's a
 # deliberate choice for a class project: AWS deploys create real,
 # billable resources (see infra/aws/README.md's cost estimate), so
 # they shouldn't happen as a side effect of every merge.
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
     inputs:
       target:
