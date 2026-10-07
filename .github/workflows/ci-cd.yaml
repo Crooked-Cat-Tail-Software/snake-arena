@@ -170,11 +170,18 @@ jobs:
       - name: Install backend dependencies
         # Only the test runner's own deps are needed here -- the app's
         # dependencies get installed *inside* the Docker build this
-        # suite runs, not on the runner itself.
+        # suite runs, not on the runner itself. tests/requirements.txt
+        # adds pytest-playwright, whose `page` fixture the browser-driven
+        # test_frontend_is_served_and_playable needs.
         working-directory: backend
         run: |
           uv venv
           uv pip install -r requirements.txt
+          uv pip install -r ../tests/requirements.txt
+
+      - name: Install Playwright's browser
+        working-directory: backend
+        run: uv run playwright install --with-deps chromium
 
       - name: Run Docker Compose integration tests
         # ubuntu-latest ships Docker + the Compose v2 plugin already.

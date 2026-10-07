@@ -901,3 +901,8 @@ scripts), and `actionlint` (the workflow) all pass with zero findings.
   Postgres on import, before the suite's own `docker compose up`. Moved
   that import into the `client` fixture. Verified: integration suite now
   collects (4 tests) with no Postgres running; backend suite still 9/9.
+- Next CI run: 3 of 4 integration tests passed (build, health, score
+  round-trip through Postgres); the browser-driven one errored with
+  `fixture 'page' not found` -- the integration job never installed
+  `tests/requirements.txt` (pytest-playwright) or Chromium. Added both,
+  mirroring the frontend job.
