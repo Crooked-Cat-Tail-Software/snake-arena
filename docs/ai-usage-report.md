@@ -964,3 +964,37 @@ pending prompt.
 
 **Still untested:** only the GitHub Actions -> AWS OIDC sign-in, blocked
 until advanced features are activated in AWS Settings.
+
+## Stage 14 — Separate build and deploy stages; YYYYMMDD-HHMMSS-shortsha tags
+
+**Asked:** split the deploy into a Build stage (build the image, push it
+to ECR) and a Deploy stage (pull the image from the registry and serve
+it); the manual prod promotion keeps pulling dev's deployed image; tag
+every image `YYYYMMDD-HHMMSS-shortsha` (e.g. `20260818-163457-83242da`).
+
+**Generated/changed:**
+- `infra/aws/build.sh` (new, Build) — ensures the ECR stack exists,
+  builds `linux/amd64`, pushes `<repo>:<UTC YYYYMMDD-HHMMSS>-<7-char
+  sha>`, prints the tag and writes `image_tag` to `$GITHUB_OUTPUT` in
+  CI. Refuses to build with uncommitted changes to tracked files (the
+  tag's SHA would be wrong); `ALLOW_DIRTY=1` overrides.
+- `infra/aws/deploy.sh` (Deploy) — no longer builds or needs Docker:
+  checks the given tag exists in ECR (or picks the newest pushed image)
+  and deploys the app stack pointing at it; ECS pulls it. New 4th
+  argument `image-tag`; the existing three-argument calls still work.
+  Also makes rollback a matter of deploying an older tag.
+- `ci-cd.yaml` — the single `deploy` job became `build` (outputs
+  `image_tag`) → `deploy` (deploys exactly that tag, then health check).
+- `00-github-oidc.yaml` — deploy role gains `ecr:DescribeImages`, which
+  `deploy.sh` now calls.
+- `promote.sh` unchanged in behavior — it already copies dev's deployed
+  image under the same tag, so prod carries the same
+  `YYYYMMDD-HHMMSS-shortsha` tag. Comments updated.
+- Docs: `infra/aws/README.md` ("Build and deploy" section, CI, promotion,
+  prod creation), top-level `README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** UTC timestamps (so
+local and CI tags sort together); 7-character short SHA (matches the
+example); dirty-tree refusal.
+
+**Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean.

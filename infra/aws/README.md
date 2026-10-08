@@ -30,8 +30,9 @@ your own AWS credentials.
   the actual access control, not subnet placement), RDS Postgres, an ECS
   cluster/task/service on Fargate, and the load balancer.
 - Deployed in two stacks because the ECS task definition needs to
-  reference an image that has to already exist in ECR -- `deploy.sh`
-  handles the ordering (ECR stack, then build+push, then app stack).
+  reference an image that has to already exist in ECR -- `build.sh`
+  creates the ECR stack and pushes the image, then `deploy.sh` deploys
+  the app stack pointing at it.
 
 The RDS master password is generated and owned by AWS Secrets Manager
 (via RDS's `ManageMasterUserPassword` feature) -- it never appears in the
@@ -52,24 +53,36 @@ by `docker-compose.yml`.
   an ALB, IAM roles, and ECR repositories.
 - Docker running locally (same as for `docker compose up`).
 
-## Deploy
+## Build and deploy
+
+Two separate stages:
 
 ```bash
 cd infra/aws
-./deploy.sh
+./build.sh     # Build: build the image, push it to ECR
+./deploy.sh    # Deploy: serve an image from ECR (the newest, by default)
 ```
 
-This runs the whole sequence: deploys the ECR repository stack, builds
-the image from the repo's `Dockerfile`, pushes it to ECR, then deploys
-the app stack (VPC, RDS, ECS, ALB) with that image. The first run takes
-the longest -- RDS alone typically takes 5-10 minutes to become
-available -- later runs (after a code change) are faster since only the
-image and the ECS service need to update.
+- **Build (`build.sh`)** makes sure the ECR repository stack exists,
+  builds the image from the repo's `Dockerfile` (for `linux/amd64`, what
+  Fargate runs), and pushes it to ECR tagged
+  **`YYYYMMDD-HHMMSS-shortsha`** -- UTC build time plus the commit it was
+  built from, e.g. `20260818-163457-83242da`. It refuses to build with
+  uncommitted changes to tracked files, since the tag would name a commit
+  the image doesn't match (`ALLOW_DIRTY=1 ./build.sh` overrides that for
+  a throwaway experiment). Needs Docker.
+- **Deploy (`deploy.sh`)** builds nothing and doesn't need Docker. It
+  checks the image tag exists in ECR, then deploys the app stack (VPC,
+  RDS, ECS, ALB) pointing at it; ECS pulls the image from ECR. The first
+  deploy takes the longest -- RDS alone typically takes 5-10 minutes --
+  later ones only roll the ECS service over to the new image.
 
-Optional arguments if you want something other than the defaults:
+Arguments, if you want something other than the defaults:
 
 ```bash
-./deploy.sh <project-name> <aws-region>   # defaults: snake-arena, us-east-2
+./build.sh  <project-name> <aws-region>                     # defaults: snake-arena, us-east-2
+./deploy.sh <project-name> <aws-region> <db-deletion-protection> <image-tag>
+            # defaults: snake-arena, us-east-2, false, newest image in ECR
 ```
 
 (us-east-2 because that's this project's assigned Region if you're on
@@ -82,10 +95,10 @@ name). It can take a minute or two after the stack finishes for the
 target group's health checks to pass -- if the URL doesn't load
 immediately, wait a bit and retry.
 
-To deploy again after a code change, just re-run `./deploy.sh` -- it
-builds a fresh image, pushes it under a new tag, and updates the app
-stack in place (the ECS service rolls over to the new task without you
-needing to do anything else).
+To deploy again after a code change, commit it, then run `./build.sh`
+and `./deploy.sh` -- the ECS service rolls over to the new image without
+you needing to do anything else. To roll back, run `./deploy.sh` with an
+older tag from ECR as the fourth argument.
 
 ## Cost
 
@@ -117,7 +130,7 @@ reduce this a lot:
   realistically a few hours of actual use, which costs pennies -- the
   ~$40/month figure only happens if you leave it up for a full month.
   Tear it down between sessions (see below) and redeploy with
-  `./deploy.sh` when you need it again.
+  `./build.sh && ./deploy.sh` when you need it again.
 
 Prices change and vary by region -- check the [AWS Pricing
 Calculator](https://calculator.aws) or your account's Cost Explorer for
@@ -164,14 +177,15 @@ the "Cost" section below while it's up.
 Prod is never built from source. It only ever runs an image that has
 already run in dev ("build once, promote"):
 
-1. Deploy dev and test it: `./deploy.sh`
+1. Build and deploy dev, then test it: `./build.sh && ./deploy.sh`
 2. Promote exactly what dev is running: `./promote.sh` (or the
    **"Promote dev to prod"** GitHub Actions workflow, see below)
 3. Tear dev back down when you're done: `./teardown.sh`
 
 `promote.sh` reads the image dev's stack runs, refuses to continue
 unless dev's `/api/health` passes, copies that image into prod's ECR
-repository under the same tag (no rebuild), updates the prod stack to
+repository under the same `YYYYMMDD-HHMMSS-shortsha` tag (no rebuild),
+updates the prod stack to
 run it, and polls prod's `/api/health`. Dev has to be up while you
 promote -- `teardown.sh` deletes dev's ECR repository, so there's
 nothing to promote while dev is down. Note that the prod stack is
@@ -181,7 +195,7 @@ promoted along with the image.
 The only time prod is built from source is its very first creation:
 
 ```bash
-./deploy.sh snake-arena-prod us-east-2 true
+./build.sh snake-arena-prod && ./deploy.sh snake-arena-prod us-east-2 true
 ```
 
 The `true` turns on RDS deletion protection (`promote.sh` always keeps
@@ -205,10 +219,17 @@ templates work unchanged there.
 integration/e2e suite (`tests/integration/`) for real. None of that
 needs AWS access.
 
-A fourth job, **deploy**, actually runs `deploy.sh` against AWS and then
-polls `/api/health` on the result to confirm it came up healthy. It only
-runs on a manual **"Run workflow"** click in the Actions tab (not on
-every push) -- see the workflow file's comment for why. It authenticates
+Two more jobs deploy dev, as separate stages, only on a manual **"Run
+workflow"** click in the Actions tab (not on every push) -- see the
+workflow file's comment for why:
+
+- **build** runs `build.sh`: builds the image and pushes it to ECR
+  tagged `YYYYMMDD-HHMMSS-shortsha`, and passes that tag on.
+- **deploy** runs `deploy.sh` with exactly that tag (ECS pulls it from
+  ECR -- no Docker build), then polls `/api/health` to confirm it came
+  up healthy.
+
+Both jobs authenticate
 with a short-lived, keyless AWS session via GitHub's OIDC identity
 provider, not a stored access key.
 
@@ -220,8 +241,8 @@ provider, not a stored access key.
 > GitHub OIDC provider (`AccessDenied ... explicit deny in a service
 > control policy`) -- this is why `snake-arena-github-oidc` rolled back
 > on 2026-09-24. Per AWS's docs that policy is lifted by **activating
-> advanced features** in AWS Settings. Until then, deploy dev and prod
-> by running `deploy.sh` locally; the CI test jobs are unaffected.
+> advanced features** in AWS Settings. Until then, build, deploy and
+> promote by running `build.sh`/`deploy.sh`/`promote.sh` locally; the CI test jobs are unaffected.
 
 1. **Deploy the OIDC role** — this has to exist before the pipeline can
    authenticate at all, so it's a separate template you deploy yourself,

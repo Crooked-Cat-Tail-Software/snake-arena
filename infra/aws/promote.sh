@@ -7,10 +7,10 @@ set -euo pipefail
 # ever receives an image that has already run in dev -- "build once,
 # promote" -- so what you tested is byte-for-byte what ships.
 #
-# Dev must be deployed and healthy (./deploy.sh): teardown.sh deletes
+# Dev must be deployed and healthy (./build.sh && ./deploy.sh): teardown.sh deletes
 # dev's ECR repository, so there's nothing to promote while dev is down.
 # Prod must already exist -- create it once with
-#   ./deploy.sh snake-arena-prod us-east-2 true
+#   ./build.sh snake-arena-prod && ./deploy.sh snake-arena-prod us-east-2 true
 # and use this script for every prod update after that.
 #
 # Used by .github/workflows/promote.yaml; also runnable by hand.
@@ -41,7 +41,7 @@ echo
 
 echo "--> [1/5] Finding the image dev is running..."
 if ! SOURCE_IMAGE=$(stack_parameter "${SOURCE_PROJECT}-app" ImageUri 2>/dev/null) || [ -z "$SOURCE_IMAGE" ] || [ "$SOURCE_IMAGE" = "None" ]; then
-  echo "No ${SOURCE_PROJECT}-app stack found -- deploy dev first (./deploy.sh) and test it."
+  echo "No ${SOURCE_PROJECT}-app stack found -- build and deploy dev first (./build.sh && ./deploy.sh) and test it."
   exit 1
 fi
 IMAGE_TAG="${SOURCE_IMAGE##*:}"

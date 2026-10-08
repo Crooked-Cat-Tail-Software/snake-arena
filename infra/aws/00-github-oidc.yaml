@@ -150,6 +150,7 @@ Resources:
                   - ecr:CompleteLayerUpload
                   - ecr:BatchGetImage
                   - ecr:DescribeRepositories
+                  - ecr:DescribeImages
                   - ecr:CreateRepository
                   - ecr:DeleteRepository
                   - ecr:PutLifecyclePolicy

@@ -281,7 +281,7 @@ tests.
 the app on AWS: ECS Fargate for the container, managed RDS for Postgres,
 behind an Application Load Balancer. See
 [infra/aws/README.md](infra/aws/README.md) for the architecture, cost
-estimate, and how to run it (`./deploy.sh`) and tear it back down
+estimate, and how to build and deploy it (`./build.sh`, then `./deploy.sh`) and tear it back down
 (`./teardown.sh`) — like the Docker commands above, these are meant to
 be run by you, not by Claude, since deploying needs your own AWS
 credentials.
