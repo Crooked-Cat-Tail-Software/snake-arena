@@ -906,3 +906,34 @@ scripts), and `actionlint` (the workflow) all pass with zero findings.
   `fixture 'page' not found` -- the integration job never installed
   `tests/requirements.txt` (pytest-playwright) or Chromium. Added both,
   mirroring the frontend job.
+
+## Stage 13 — Promote dev to prod (manual GitHub Actions workflow)
+
+**Asked:** a manual GitHub Actions workflow that promotes the dev
+version to production.
+
+**Decisions:** "the dev version" = the exact image dev's ECS service is
+running, copied to prod with no rebuild (build once, promote). Prod is
+promotion-only (the human chose to remove `ci-cd.yaml`'s build-from-
+source `deploy-prod` job); `deploy.sh` is used for prod's first creation
+only.
+
+**Generated/changed:**
+- `infra/aws/promote.sh` (new) — reads dev's `ImageUri` stack parameter,
+  refuses unless dev's `/api/health` passes, pulls that image (amd64)
+  and pushes it to prod's ECR under the same tag, `cloudformation
+  deploy`s the prod app stack with it (deletion protection kept on), and
+  polls prod's `/api/health`. Dev must be up: teardown deletes dev's ECR.
+- `.github/workflows/promote.yaml` (new) — `workflow_dispatch` only,
+  `master` only, `production` environment (required approval),
+  non-cancelling concurrency group, prod OIDC role; runs `promote.sh`.
+- `00-github-oidc.yaml` — optional `PromoteFromProjectName`: adds
+  read-only ECR pull on dev's repo and `DescribeStacks` on dev's app
+  stack to the prod role. Blank (dev's role) changes nothing.
+- `ci-cd.yaml` — removed `deploy-prod` and the dev/prod input; "Run
+  workflow" deploys dev only.
+- `infra/aws/README.md`, `deploy.sh` header, `AGENTS.md` layout updated.
+
+**Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean. The
+workflow can't run yet: GitHub OIDC is blocked by the project's SCP until
+advanced features are activated (see Stage 12).

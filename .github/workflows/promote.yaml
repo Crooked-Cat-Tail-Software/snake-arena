@@ -1,0 +1,65 @@
+name: Promote dev to prod
+
+# Manual only: Actions tab -> "Promote dev to prod" -> Run workflow (on
+# master). Copies the exact image dev is running into prod and updates
+# prod to run it -- no rebuild, so prod only ever gets an image that has
+# already run in dev. Dev must be deployed and healthy first (see
+# infra/aws/promote.sh); prod must already exist.
+#
+# Runs in the "production" GitHub Environment, so it waits for that
+# environment's required reviewers before it starts, and authenticates
+# with the prod deploy role (AWS_PROD_DEPLOY_ROLE_ARN, an environment
+# variable) -- see infra/aws/README.md's "Promoting dev to prod".
+on:
+  workflow_dispatch: {}
+
+# Never run two promotions at once, and never cancel one halfway through
+# a CloudFormation update.
+concurrency:
+  group: promote-prod
+  cancel-in-progress: false
+
+env:
+  SOURCE_PROJECT_NAME: snake-arena
+  TARGET_PROJECT_NAME: snake-arena-prod
+  AWS_REGION: us-east-2
+
+jobs:
+  promote:
+    name: Promote dev image to prod
+    runs-on: ubuntu-latest
+    # Belt and braces alongside the environment's own branch rule.
+    if: github.ref == 'refs/heads/master'
+    environment:
+      name: production
+      url: ${{ steps.app_url.outputs.url }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PROD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Promote
+        # Checks dev's health, copies its image to prod's ECR, updates
+        # the prod stack, and polls prod's /api/health -- fails the job
+        # if any step does.
+        run: |
+          chmod +x infra/aws/promote.sh
+          infra/aws/promote.sh "$SOURCE_PROJECT_NAME" "$TARGET_PROJECT_NAME" "$AWS_REGION"
+
+      - name: Get the prod URL
+        id: app_url
+        run: |
+          url=$(aws cloudformation describe-stacks \
+            --stack-name "${TARGET_PROJECT_NAME}-app" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" \
+            --output text)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Prod: $url"
