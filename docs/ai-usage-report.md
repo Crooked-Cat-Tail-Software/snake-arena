@@ -937,3 +937,30 @@ only.
 **Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean. The
 workflow can't run yet: GitHub OIDC is blocked by the project's SCP until
 advanced features are activated (see Stage 12).
+
+**Real end-to-end test of the promotion path (2026-10-07, after merging
+PR #3):** run locally with `promote.sh`, since the GitHub workflow can't
+authenticate to AWS yet.
+- Deployed dev with `./deploy.sh` -> healthy, running image tag
+  `20261007190140`. (Prod was on `20261007162817` beforehand.)
+- `./promote.sh` -> all 5 steps passed; prod healthy on the first check.
+- Verified independently, not just from the script's output: the prod
+  stack is `UPDATE_COMPLETE` with `ImageUri` `snake-arena-prod:20261007190140`;
+  the running ECS task uses that image; `/api/health`, `/` (HTTP 200) and
+  `/api/scores` (HTTP 200) all respond; RDS deletion protection still on.
+- Byte-for-byte check: prod's copy has a different top-level digest
+  (`a630fc…`) because `docker pull`/`push` wraps the image in a new OCI
+  index, but that index's amd64 manifest is dev's exact `929ed9…`, with
+  identical config and layer digests.
+- Tore dev back down with `./teardown.sh`; prod still healthy afterwards.
+
+**Hiccup worth knowing:** the first attempt hung ~30 minutes at the very
+start of `docker build` (resolving `docker/dockerfile:1`). Docker Hub was
+reachable and restarting Docker Desktop didn't help; the cause was Docker
+Desktop's `desktop` credential helper hanging while Docker Desktop waited
+on a dialog in its own window. Fixed by the human accepting that dialog.
+If a build sits on its first step for minutes, check Docker Desktop for a
+pending prompt.
+
+**Still untested:** only the GitHub Actions -> AWS OIDC sign-in, blocked
+until advanced features are activated in AWS Settings.
