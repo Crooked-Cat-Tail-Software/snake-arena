@@ -1340,3 +1340,17 @@ cost or data pollution — closed enums).
 **Verified so far:** 35/35 tests; `cfn-lint` clean; the real collector
 (stdout mode) published the metric with exactly the alarm's dimensions
 and correct counts.
+
+**Then (human approved: deploy, test-fire dev, then prod):** committed
+`6c375e2`; updated the shared stack with the alert email (subscription
+confirmed by the human); built and deployed
+`20261009-030525-6c375e2` to dev. Alarm description and tags verified via
+the API (all five fields present). Test fire: 3 reports to dev at
+03:14:20 UTC → alarm in ALARM at ~03:15:40, SNS notification sent
+03:15:36; back to OK at 03:25:49 with an OK notification. Promoted to
+prod (healthy; prod alarm reads environment=prod and the same version;
+RDS untouched). Prod alarm not test-fired.
+
+**Not verified by Claude:** that the notification emails actually reached
+the inbox and read well (SNS reported successful delivery to the topic;
+the human was asked to check).
