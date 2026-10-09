@@ -39,6 +39,13 @@ stack_parameter() {
 echo "== Snake Arena promotion: $SOURCE_PROJECT -> $TARGET_PROJECT ($AWS_REGION) =="
 echo
 
+# The app stack imports the shared metrics log group and alarm topic.
+if ! aws cloudformation describe-stacks --stack-name snake-arena-observability \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "No snake-arena-observability stack -- run ./deploy-observability.sh $AWS_REGION first."
+  exit 1
+fi
+
 echo "--> [1/5] Finding the image dev is running..."
 if ! SOURCE_IMAGE=$(stack_parameter "${SOURCE_PROJECT}-app" ImageUri 2>/dev/null) || [ -z "$SOURCE_IMAGE" ] || [ "$SOURCE_IMAGE" = "None" ]; then
   echo "No ${SOURCE_PROJECT}-app stack found -- build and deploy dev first (./build.sh && ./deploy.sh) and test it."

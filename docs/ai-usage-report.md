@@ -1225,3 +1225,57 @@ star dashboards). Fixed after seeing it: chart y-axes auto-scaled from
 
 **Not verified:** the games/score panels (needs real games — no fake
 scores were written to dev); prod (not redeployed).
+
+## Stage 19 — Separate, shared observability stack for dev and prod
+
+**Asked:** deploy the observability stack, separate from the application
+stack, and connect both dev and prod to it. The human chose a
+CloudWatch-native stack (over Grafana hosted on AWS at ~$30-35/month, or a
+central collector needing cross-VPC networking).
+
+**Generated/changed:**
+- `infra/aws/01-observability.yaml` (new, stack
+  `snake-arena-observability`): metrics log group `/snake-arena/metrics`
+  (7 days, one stream per environment), SNS topic `snake-arena-alarms`
+  with optional `AlarmEmail`, CloudWatch dashboard `snake-arena`
+  (Environment / Version pattern variables over SEARCH expressions, 4
+  totals, 4 charts, a selected-version row, both environments' alarms),
+  X-Ray groups per environment. Exports the log group and topic.
+- `infra/aws/02-app.yaml` — imports those instead of owning a metrics log
+  group, SNS topic and `AlarmEmail`; collector writes to the shared group
+  (stream = project name); alarms notify the shared topic. New
+  `ObservabilityStackName` parameter. Dependency direction deliberately
+  app → observability, so dev can still be torn down freely.
+- `infra/aws/deploy-observability.sh` (new); `deploy.sh` / `promote.sh`
+  refuse to run without the shared stack; `deploy.sh` loses
+  `ALARM_EMAIL` (moved to the shared stack). `00-github-oidc.yaml` loses
+  its SNS permissions (app stacks no longer create topics).
+- `backend/app/telemetry.py` — `ResourceAttributesOnSpans` copies
+  environment and version onto every span; test extended.
+- Docs: `infra/aws/README.md` ("Observability" rewritten, deploy order,
+  teardown, cost), `README.md`, `AGENTS.md`.
+
+**Found and fixed along the way:**
+- The Stage 16 claim that traces were filterable by environment/version
+  in X-Ray was wrong: 856 recent traces had **no** annotations. The
+  collector's `indexed_attributes` only indexes span attributes, and
+  environment/version are resource attributes (they arrived as
+  `otel.resource.*` metadata). README instructions to filter by
+  annotation were therefore wrong until this fix.
+- First fix attempt — a `transform` processor in the collector — was
+  tested locally first: this ADOT build doesn't include it and the
+  collector exits at startup. Deployed, that would have stopped all
+  telemetry in both environments. Moved the copy into the app instead.
+
+**Verified so far:** both templates `cfn-lint` clean, scripts
+`shellcheck` clean, 27/27 tests. Every dashboard SEARCH expression run
+through `GetMetricData` against real dev data with the placeholders
+filled in: all valid; counts match earlier traffic (13 reads, 2
+rejections split by reason). Deployed the shared stack, then dev (same
+image): dev alarms now point at `snake-arena-alarms`, dev metrics write
+to stream `snake-arena` in `/snake-arena/metrics`, old per-app metrics
+log group removed.
+
+**Not verified:** the dashboard's dropdowns in the console (the browser
+pane isn't signed in to AWS, and Claude doesn't enter sign-in
+credentials).

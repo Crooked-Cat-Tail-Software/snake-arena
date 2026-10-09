@@ -42,7 +42,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from sqlalchemy.engine import Engine
 
@@ -80,6 +80,23 @@ def build_resource() -> Resource:
             "deployment.environment": environment,
         }
     )
+
+
+# Resource attributes also copied onto every span: AWS X-Ray only makes
+# span attributes searchable (as annotations, e.g.
+# annotation.deployment_environment_name = "prod"); resource attributes
+# arrive as unsearchable metadata.
+SPAN_COPIED_RESOURCE_ATTRIBUTES = ("deployment.environment.name", "service.version")
+
+
+class ResourceAttributesOnSpans(SpanProcessor):
+    """Copies SPAN_COPIED_RESOURCE_ATTRIBUTES onto each span as it starts."""
+
+    def on_start(self, span: Span, parent_context=None) -> None:
+        for key in SPAN_COPIED_RESOURCE_ATTRIBUTES:
+            value = span.resource.attributes.get(key)
+            if value is not None:
+                span.set_attribute(key, value)
 
 
 def _exporter_choice(signal: str) -> str:
@@ -131,6 +148,7 @@ def setup_telemetry(app: FastAPI, engine: Engine) -> None:
     resource = build_resource()
 
     tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(ResourceAttributesOnSpans())
     _add_span_exporter(tracer_provider)
     trace.set_tracer_provider(tracer_provider)
 

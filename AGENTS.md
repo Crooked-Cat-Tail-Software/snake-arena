@@ -169,7 +169,15 @@ a matching `metric_declarations` entry in the collector config, or it is
 silently not published. Metrics are published with dimensions
 environment + `service.version` (+ `reason`); the local Grafana dashboard
 (`grafana/`, `docker compose --profile monitoring`) sums across versions,
-so keep those dimension sets in step with its queries. Any new IAM role in `02-app.yaml` must also be added
+so keep those dimension sets in step with its queries (and with the
+CloudWatch dashboard's SEARCH expressions in
+`infra/aws/01-observability.yaml`). That shared stack
+(`snake-arena-observability`) owns the metrics log group, alarm topic,
+dashboard and X-Ray groups; app stacks only import from it -- never make
+it import from an app stack, or dev could no longer be torn down. The
+ADOT collector image has no `transform` processor (it fails to start
+with one); per-span attribute changes go in the app
+(`telemetry.py`'s `ResourceAttributesOnSpans`). Any new IAM role in `02-app.yaml` must also be added
 to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
 CI deploys will fail with AccessDenied once they work. (They don't yet:
 the deploy role stacks can't be created on this AWS project until

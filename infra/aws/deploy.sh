@@ -28,9 +28,6 @@ AWS_REGION="${2:-us-east-2}"
 DB_DELETION_PROTECTION="${3:-false}"
 IMAGE_TAG="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Optional: set ALARM_EMAIL=you@example.com to get alarm emails (see
-# AlarmEmail in 02-app.yaml). Unset keeps the stack's current setting;
-# ALARM_EMAIL= (empty) turns notifications off.
 # Reported on every trace as deployment.environment.name.
 case "$PROJECT_NAME" in
   *-prod) DEPLOY_ENV=prod ;;
@@ -42,6 +39,14 @@ command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and si
 echo "== Snake Arena deploy =="
 echo "Project: $PROJECT_NAME ($DEPLOY_ENV)   Region: $AWS_REGION   DB deletion protection: $DB_DELETION_PROTECTION"
 echo
+
+# The app stack imports the shared metrics log group and alarm topic.
+if ! aws cloudformation describe-stacks --stack-name snake-arena-observability \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "No snake-arena-observability stack -- run ./deploy-observability.sh $AWS_REGION first"
+  echo "(once; dev and prod share it)."
+  exit 1
+fi
 
 echo "--> [1/3] Finding the image in ECR..."
 if ! REPO_URI=$(aws cloudformation describe-stacks \
@@ -83,7 +88,6 @@ aws cloudformation deploy \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="$IMAGE_URI" \
     DBDeletionProtection="$DB_DELETION_PROTECTION" DeploymentEnvironment="$DEPLOY_ENV" \
-    ${ALARM_EMAIL+AlarmEmail="$ALARM_EMAIL"} \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$AWS_REGION"

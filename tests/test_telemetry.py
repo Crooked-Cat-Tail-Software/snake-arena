@@ -51,6 +51,10 @@ def test_requests_produce_spans_with_resource(client, spans):
     assert [s.name for s in server_spans] == ["POST /api/scores"]
     for attr in ("service.name", "deployment.environment.name", "service.version"):
         assert attr in server_spans[0].resource.attributes
+    # Copied onto every span too, so X-Ray can index them as annotations.
+    for span in finished:
+        for attr in ("deployment.environment.name", "service.version"):
+            assert span.attributes[attr] == span.resource.attributes[attr]
 
 
 def test_health_check_not_traced(client, spans):

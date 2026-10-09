@@ -1,0 +1,468 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Snake Arena -- shared observability, one copy for dev and prod: the
+  metrics log group both environments' collectors write to, the alarm
+  notification topic, a CloudWatch dashboard (environment and version
+  dropdowns), and an X-Ray group per environment. Deploy this before the
+  app stacks; they import its exports (see infra/aws/README.md).
+
+  The dependency only runs app -> observability, so app stacks can still
+  be torn down and recreated freely. This stack can only be deleted once
+  no app stack imports from it.
+
+Parameters:
+  DevProjectName:
+    Type: String
+    Default: snake-arena
+    Description: Project name of the dev app stack (for its X-Ray group and alarms on the dashboard).
+
+  ProdProjectName:
+    Type: String
+    Default: snake-arena-prod
+    Description: Project name of the prod app stack.
+
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. Email address notified when any dev or prod alarm fires (AWS
+      sends a confirmation email first -- click the link in it). Blank =
+      alarms still change state in the CloudWatch console, but notify no
+      one. deploy-observability.sh sets this from ALARM_EMAIL.
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+
+Resources:
+  # Embedded Metric Format records from both environments' ADOT
+  # collectors (one log stream per environment); CloudWatch extracts the
+  # SnakeArena metrics from them. The metrics themselves are kept by
+  # CloudWatch for 15 months regardless of this retention.
+  MetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /snake-arena/metrics
+      RetentionInDays: 7
+
+  # Every dev and prod alarm notifies here.
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: snake-arena-alarms
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # One-click trace filters per environment. The annotation comes from the
+  # app copying deployment.environment.name onto every span (see
+  # backend/app/telemetry.py) and the collector indexing it.
+  DevTraceGroup:
+    Type: AWS::XRay::Group
+    Properties:
+      GroupName: !Ref DevProjectName
+      FilterExpression: annotation.deployment_environment_name = "dev"
+
+  ProdTraceGroup:
+    Type: AWS::XRay::Group
+    Properties:
+      GroupName: !Ref ProdProjectName
+      FilterExpression: annotation.deployment_environment_name = "prod"
+
+  # The Environment and Version dropdowns are "pattern" variables: the
+  # console replaces SNAKEENV / SNAKEVERSION in the widget definitions
+  # below with the selected value. Version choices come from the versions
+  # that have published leaderboard.reads in the last two weeks.
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: snake-arena
+      DashboardBody: !Sub |
+        {
+          "start": "-PT24H",
+          "periodOverride": "inherit",
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "properties": {
+                "markdown": "## Snake Arena \u2014 game metrics\nPick **Environment** and **Version** above. The top three rows cover *all versions* in the environment; the *Selected version* row filters to one release. Traces: X-Ray groups `snake-arena-dev` / `snake-arena-prod`."
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 2,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "title": "Games finished",
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "setPeriodToTimeRange": true,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.submitted\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum'))",
+                      "id": "e0",
+                      "label": "Games finished"
+                    }
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 6,
+              "y": 2,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "title": "New #1 scores",
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "setPeriodToTimeRange": true,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"leaderboard.new_top_score\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum'))",
+                      "id": "e1",
+                      "label": "New #1 scores"
+                    }
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 2,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "title": "Leaderboard reads",
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "setPeriodToTimeRange": true,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"leaderboard.reads\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum'))",
+                      "id": "e2",
+                      "label": "Leaderboard reads"
+                    }
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 18,
+              "y": 2,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "title": "Rejected submissions",
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "setPeriodToTimeRange": true,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\",reason} MetricName=\"scores.rejected\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum'))",
+                      "id": "e3",
+                      "label": "Rejected submissions"
+                    }
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Games finished by version",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.submitted\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum')",
+                      "id": "g",
+                      "label": "${!PROP('Dim.service.version')}"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Scores by version (median, p90, max)",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.value\" \"deployment.environment.name\"=\"SNAKEENV\"', 'p50')",
+                      "id": "p50",
+                      "label": "${!PROP('Dim.service.version')} median"
+                    }
+                  ],
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.value\" \"deployment.environment.name\"=\"SNAKEENV\"', 'p90')",
+                      "id": "p90",
+                      "label": "${!PROP('Dim.service.version')} p90"
+                    }
+                  ],
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.value\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Maximum')",
+                      "id": "mx",
+                      "label": "${!PROP('Dim.service.version')} max"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Rejected submissions by reason",
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\",reason} MetricName=\"scores.rejected\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum')",
+                      "id": "r",
+                      "label": "${!PROP('Dim.reason')} (${!PROP('Dim.service.version')})"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Leaderboard activity",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"leaderboard.reads\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum')",
+                      "id": "lr",
+                      "label": "reads (${!PROP('Dim.service.version')})"
+                    }
+                  ],
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"leaderboard.new_top_score\" \"deployment.environment.name\"=\"SNAKEENV\"', 'Sum')",
+                      "id": "nt",
+                      "label": "new #1 (${!PROP('Dim.service.version')})"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 18,
+              "width": 24,
+              "height": 1,
+              "properties": {
+                "markdown": "### Selected version: `SNAKEVERSION`"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 19,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Games finished \u2014 selected version",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.submitted\" \"deployment.environment.name\"=\"SNAKEENV\" \"service.version\"=\"SNAKEVERSION\"', 'Sum'))",
+                      "id": "vg",
+                      "label": "games"
+                    }
+                  ],
+                  [
+                    {
+                      "expression": "SUM(SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\",reason} MetricName=\"scores.rejected\" \"deployment.environment.name\"=\"SNAKEENV\" \"service.version\"=\"SNAKEVERSION\"', 'Sum'))",
+                      "id": "vr",
+                      "label": "rejected"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 19,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Scores \u2014 selected version",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300,
+                "metrics": [
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.value\" \"deployment.environment.name\"=\"SNAKEENV\" \"service.version\"=\"SNAKEVERSION\"', 'p50')",
+                      "id": "vp",
+                      "label": "median"
+                    }
+                  ],
+                  [
+                    {
+                      "expression": "SEARCH('{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"scores.value\" \"deployment.environment.name\"=\"SNAKEENV\" \"service.version\"=\"SNAKEVERSION\"', 'Maximum')",
+                      "id": "vm",
+                      "label": "max"
+                    }
+                  ]
+                ],
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "alarm",
+              "x": 0,
+              "y": 25,
+              "width": 24,
+              "height": 3,
+              "properties": {
+                "title": "Alarms (dev and prod)",
+                "alarms": [
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DevProjectName}-5xx-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DevProjectName}-memory-high",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProdProjectName}-5xx-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProdProjectName}-memory-high"
+                ]
+              }
+            }
+          ],
+          "variables": [
+            {
+              "type": "pattern",
+              "pattern": "SNAKEENV",
+              "inputType": "select",
+              "id": "env",
+              "label": "Environment",
+              "defaultValue": "dev",
+              "visible": true,
+              "values": [
+                {
+                  "value": "dev",
+                  "label": "dev"
+                },
+                {
+                  "value": "prod",
+                  "label": "prod"
+                }
+              ]
+            },
+            {
+              "type": "pattern",
+              "pattern": "SNAKEVERSION",
+              "inputType": "select",
+              "id": "version",
+              "label": "Version",
+              "defaultValue": "__FIRST",
+              "visible": true,
+              "search": "{SnakeArena,\"deployment.environment.name\",\"service.version\"} MetricName=\"leaderboard.reads\"",
+              "populateFrom": "service.version"
+            }
+          ]
+        }
+
+Outputs:
+  MetricsLogGroupName:
+    Value: !Ref MetricsLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-MetricsLogGroupName"
+
+  MetricsLogGroupArn:
+    Value: !GetAtt MetricsLogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetricsLogGroupArn"
+
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlarmTopicArn"
+
+  DashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/snake-arena"

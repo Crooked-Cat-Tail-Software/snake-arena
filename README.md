@@ -334,10 +334,13 @@ Where spans go is set with the standard OTel environment variables:
 - Neither set (the default locally) — spans are created but not sent
   anywhere.
 
-On AWS, the ECS task runs an ADOT collector sidecar that forwards traces
-to AWS X-Ray and metrics to CloudWatch (namespace `SnakeArena`), and two
-alarms watch for server errors and high memory — see "Tracing, metrics
-and alarms" in [infra/aws/README.md](infra/aws/README.md).
+On AWS, each environment's ECS task runs an ADOT collector sidecar that
+forwards traces to AWS X-Ray and metrics to CloudWatch (namespace
+`SnakeArena`). A separate, shared observability stack holds what dev and
+prod have in common — the metrics log group, the alarm-notification
+topic, a CloudWatch dashboard with environment and version dropdowns, and
+an X-Ray group per environment. See "Observability" in
+[infra/aws/README.md](infra/aws/README.md).
 
 ## Deploy to AWS
 

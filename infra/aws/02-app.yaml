@@ -81,14 +81,13 @@ Parameters:
       forwards the app's traces to AWS X-Ray. Pinned to a release; must be
       v0.34.0 or newer (older versions silently drop W3C-format trace IDs).
 
-  AlarmEmail:
+  ObservabilityStackName:
     Type: String
-    Default: ""
+    Default: snake-arena-observability
     Description: >
-      Optional. Email address that gets notified when an alarm fires (AWS
-      sends a confirmation email first -- click the link in it). Blank =
-      alarms still change state in the CloudWatch console, but notify no
-      one. deploy.sh sets this from the ALARM_EMAIL environment variable.
+      The shared observability stack (01-observability.yaml) this app sends
+      its metrics and alarm notifications to. Deploy it first -- deploy.sh
+      checks. Shared by dev and prod.
 
   DBDeletionProtection:
     Type: String
@@ -111,9 +110,6 @@ Parameters:
   PublicSubnet2Cidr:
     Type: String
     Default: 10.0.1.0/24
-
-Conditions:
-  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
 
 Resources:
   # ---------------------------------------------------------------------
@@ -309,16 +305,6 @@ Resources:
       LogGroupName: !Sub "/ecs/${ProjectName}"
       RetentionInDays: 14
 
-  # Raw records the collector writes in CloudWatch's Embedded Metric
-  # Format; CloudWatch extracts the SnakeArena metrics from them. Created
-  # here (rather than letting the collector create it) so it expires --
-  # the metrics themselves are kept by CloudWatch independently.
-  MetricsLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/ecs/${ProjectName}/metrics"
-      RetentionInDays: 7
-
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -345,7 +331,7 @@ Resources:
 
   # Role the running containers use (unlike ExecutionRole, which ECS
   # itself uses to start them). Only the ADOT collector needs AWS access:
-  # writing traces to X-Ray and metrics to its one log group.
+  # writing traces to X-Ray and metrics to the shared metrics log group.
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -384,7 +370,9 @@ Resources:
                   - logs:CreateLogStream
                   - logs:DescribeLogStreams
                   - logs:PutLogEvents
-                Resource: !GetAtt MetricsLogGroup.Arn
+                # The shared metrics log group (01-observability.yaml).
+                Resource:
+                  Fn::ImportValue: !Sub "${ObservabilityStackName}-MetricsLogGroupArn"
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -456,66 +444,74 @@ Resources:
             Enabled: true
           Environment:
             - Name: AOT_CONFIG_CONTENT
-              Value: !Sub |
-                extensions:
-                  health_check:
-                    endpoint: 127.0.0.1:13133
-                receivers:
-                  otlp:
-                    protocols:
-                      http:
-                        endpoint: 127.0.0.1:4318
-                processors:
-                  memory_limiter:
-                    check_interval: 5s
-                    limit_mib: 100
-                    spike_limit_mib: 25
-                  batch: {}
-                exporters:
-                  awsxray:
-                    region: ${AWS::Region}
-                    # Searchable in X-Ray as annotations
-                    # (deployment_environment_name, service_version).
-                    indexed_attributes:
-                      - deployment.environment.name
-                      - service.version
-                  # Game metrics -> CloudWatch, namespace SnakeArena. Only
-                  # the declarations below are published, each with only
-                  # the listed dimensions (every dimension combination is a
-                  # separately billed metric; rollups and per-task IDs
-                  # would multiply that). service.version is a dimension so
-                  # dashboards can filter by release; each deploy starts new
-                  # series and the old ones stop, so the billed count stays
-                  # ~flat. Totals across versions are summed at query time.
-                  awsemf:
-                    region: ${AWS::Region}
-                    namespace: SnakeArena
-                    log_group_name: /ecs/${ProjectName}/metrics
-                    log_stream_name: app-metrics
-                    dimension_rollup_option: NoDimensionRollup
-                    resource_to_telemetry_conversion:
-                      enabled: true
-                    metric_declarations:
-                      - dimensions: [[deployment.environment.name, service.version]]
-                        metric_name_selectors:
-                          - "^scores[.]submitted$"
-                          - "^scores[.]value$"
-                          - "^leaderboard[.]reads$"
-                          - "^leaderboard[.]new_top_score$"
-                      - dimensions: [[deployment.environment.name, service.version, reason]]
-                        metric_name_selectors:
-                          - "^scores[.]rejected$"
-                service:
-                  extensions: [health_check]
-                  pipelines:
-                    traces:
-                      receivers: [otlp]
-                      processors: [memory_limiter, batch]
-                      exporters: [awsxray]
-                    metrics:
-                      receivers: [otlp]
-                      processors: [memory_limiter, batch]
-                      exporters: [awsemf]
+              Value: !Sub
+                - |
+                  extensions:
+                    health_check:
+                      endpoint: 127.0.0.1:13133
+                  receivers:
+                    otlp:
+                      protocols:
+                        http:
+                          endpoint: 127.0.0.1:4318
+                  processors:
+                    memory_limiter:
+                      check_interval: 5s
+                      limit_mib: 100
+                      spike_limit_mib: 25
+                    batch: {}
+                  exporters:
+                    awsxray:
+                      region: ${AWS::Region}
+                      # Searchable in X-Ray as annotations
+                      # (deployment_environment_name, service_version). Only
+                      # *span* attributes are indexed -- the app copies these
+                      # two resource attributes onto every span (see
+                      # backend/app/telemetry.py), since this ADOT build has
+                      # no transform processor to do it here.
+                      indexed_attributes:
+                        - deployment.environment.name
+                        - service.version
+                    # Game metrics -> CloudWatch, namespace SnakeArena. Only
+                    # the declarations below are published, each with only
+                    # the listed dimensions (every dimension combination is a
+                    # separately billed metric; rollups and per-task IDs
+                    # would multiply that). service.version is a dimension so
+                    # dashboards can filter by release; each deploy starts new
+                    # series and the old ones stop, so the billed count stays
+                    # ~flat. Totals across versions are summed at query time.
+                    awsemf:
+                      region: ${AWS::Region}
+                      namespace: SnakeArena
+                      # Shared with the other environment (one stream each).
+                      log_group_name: ${MetricsLogGroupName}
+                      log_stream_name: ${ProjectName}
+                      dimension_rollup_option: NoDimensionRollup
+                      resource_to_telemetry_conversion:
+                        enabled: true
+                      metric_declarations:
+                        - dimensions: [[deployment.environment.name, service.version]]
+                          metric_name_selectors:
+                            - "^scores[.]submitted$"
+                            - "^scores[.]value$"
+                            - "^leaderboard[.]reads$"
+                            - "^leaderboard[.]new_top_score$"
+                        - dimensions: [[deployment.environment.name, service.version, reason]]
+                          metric_name_selectors:
+                            - "^scores[.]rejected$"
+                  service:
+                    extensions: [health_check]
+                    pipelines:
+                      traces:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [awsxray]
+                      metrics:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [awsemf]
+                - MetricsLogGroupName:
+                    Fn::ImportValue: !Sub "${ObservabilityStackName}-MetricsLogGroupName"
           HealthCheck:
             Command: ["/healthcheck"]
             Interval: 30
@@ -592,23 +588,9 @@ Resources:
           TargetGroupArn: !Ref TargetGroup
 
   # ---------------------------------------------------------------------
-  # Alarms (~$0.10/month per metric they watch). Without AlarmEmail they
-  # only change state in the CloudWatch console.
+  # Alarms (~$0.10/month per metric they watch). They notify through the
+  # shared alarm topic in 01-observability.yaml (emails are set up there).
   # ---------------------------------------------------------------------
-  AlarmTopic:
-    Type: AWS::SNS::Topic
-    Condition: HasAlarmEmail
-    Properties:
-      TopicName: !Sub "${ProjectName}-alarms"
-
-  AlarmEmailSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: HasAlarmEmail
-    Properties:
-      TopicArn: !Ref AlarmTopic
-      Protocol: email
-      Endpoint: !Ref AlarmEmail
-
   # 5xx from the app itself (Target) or from the ALB (e.g. 502/503 when no
   # healthy task is running), summed.
   ServerErrorsAlarm:
@@ -647,8 +629,10 @@ Resources:
       Threshold: 5
       EvaluationPeriods: 1
       TreatMissingData: notBreaching
-      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
-      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
 
   # The app and the collector share the task's memory; sustained >80%
   # means it's time to raise ContainerMemory before the task gets killed.
@@ -670,8 +654,10 @@ Resources:
       Threshold: 80
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
-      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
-      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
 
 Outputs:
   AppUrl:

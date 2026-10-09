@@ -238,8 +238,9 @@ Resources:
                   StringEquals:
                     iam:PassedToService: ecs-tasks.amazonaws.com
 
-              # --- Alarms and the optional alarm-email SNS topic
-              # 02-app.yaml creates, scoped to this project's names. ---
+              # --- Alarms 02-app.yaml creates, scoped to this project's
+              # names. (Their SNS topic lives in the shared observability
+              # stack, which is deployed by hand, not by CI.) ---
               - Sid: ManageProjectAlarms
                 Effect: Allow
                 Action:
@@ -249,21 +250,6 @@ Resources:
                   - cloudwatch:UntagResource
                   - cloudwatch:ListTagsForResource
                 Resource: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-*"
-              - Sid: ManageProjectAlarmTopic
-                Effect: Allow
-                Action:
-                  - sns:CreateTopic
-                  - sns:DeleteTopic
-                  - sns:GetTopicAttributes
-                  - sns:SetTopicAttributes
-                  - sns:TagResource
-                  - sns:UntagResource
-                  - sns:ListTagsForResource
-                  - sns:Subscribe
-                  - sns:Unsubscribe
-                  - sns:GetSubscriptionAttributes
-                  - sns:ListSubscriptionsByTopic
-                Resource: !Sub "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${ProjectName}-*"
 
               # --- Everything else 02-app.yaml creates: a VPC and its
               # networking, RDS, ECS, and the ALB. AWS does not support

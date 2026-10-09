@@ -46,44 +46,55 @@ variables the task definition sets, instead of a single `DATABASE_URL`
 of, not instead of, the existing `DATABASE_URL` support used locally and
 by `docker-compose.yml`.
 
-### Tracing, metrics and alarms
+### Observability: a shared stack plus a collector per app
 
-The ECS task runs two containers: the app, and an AWS Distro for
-OpenTelemetry (ADOT) collector sidecar. The app sends its OpenTelemetry
-traces and game metrics (see "Telemetry" in the top-level README) to the
-collector on `localhost:4318`; the collector forwards traces to X-Ray and
-metrics to CloudWatch using the task role `<project>-ecs-task-role`, which
-can only write traces and write to the `/ecs/<project>/metrics` log group.
+**`01-observability.yaml`** (stack `snake-arena-observability`) is shared
+by dev and prod, and deployed separately from them, once, before either
+(`./deploy-observability.sh`; `deploy.sh` checks it exists):
+
+| Resource | What it's for |
+|---|---|
+| Log group `/snake-arena/metrics` (7 days) | Both collectors' metric records, one stream per environment (`snake-arena`, `snake-arena-prod`). CloudWatch extracts the `SnakeArena` metrics from them and keeps those 15 months. |
+| SNS topic `snake-arena-alarms` | Every dev and prod alarm notifies here. Emails: `ALARM_EMAIL=you@example.com ./deploy-observability.sh`, then click AWS's confirmation link; `ALARM_EMAIL= ./deploy-observability.sh` turns them off. |
+| Dashboard `snake-arena` | Game metrics with **Environment** and **Version** dropdowns, plus both environments' alarms. The URL is printed by `deploy-observability.sh`. |
+| X-Ray groups `snake-arena`, `snake-arena-prod` | Each environment's traces, one click away (X-Ray → Traces → group). |
+
+The app stacks *import* these (they never create their own), so the
+dependency runs only app → observability: dev can still be torn down
+and redeployed freely. The observability stack can only be deleted after
+both app stacks are gone.
+
+Inside each app's ECS task, an AWS Distro for OpenTelemetry (ADOT)
+collector sidecar receives the app's traces and game metrics on
+`localhost:4318` and forwards them — traces to X-Ray, metrics to the
+shared log group — using the task role `<project>-ecs-task-role`, which
+can only write traces and write to that log group.
 
 - **Metrics:** CloudWatch → Metrics → `SnakeArena` namespace, one series
   per environment (`deployment.environment.name`) and deployed version
   (`service.version`), plus `reason` on `scores.rejected`. Each deploy
   starts new series and the old version's stop, so the billed count stays
-  about flat; totals across versions are summed at query time (the
-  Grafana dashboard does this — see the top-level README). They arrive about once a minute. For
-  `scores.value`, the `p50` statistic is the median score. The collector
-  writes them as Embedded Metric Format records to
-  `/ecs/<project>/metrics` (kept 7 days; the metrics themselves are kept
-  by CloudWatch for 15 months). Only the five declared metrics, with only
-  the declared dimensions, are published — see `awsemf` in `02-app.yaml`
-  before adding labels, since each label combination is billed.
-- **Alarms:** `<project>-5xx-errors` (5+ server errors from the app or
-  load balancer in 5 minutes) and `<project>-memory-high` (task memory
-  above 80% for 15 minutes). To get emails, deploy with
-  `ALARM_EMAIL=you@example.com ./deploy.sh` and click the confirmation
-  link AWS sends; the address sticks for later deploys, and
-  `ALARM_EMAIL= ./deploy.sh` turns emails off.
-
-- **Where to look:** CloudWatch console → Application Signals → Traces
-  (or X-Ray → Traces), in `us-east-2`. Filter one environment with
-  `annotation.deployment_environment_name = "prod"`, or one release with
-  `annotation.service_version = "<image tag>"`.
+  about flat; totals across versions are summed at query time (both
+  dashboards do this). They arrive about once a minute. For
+  `scores.value`, the `p50` statistic is the median score. Only the five
+  declared metrics, with only the declared dimensions, are published —
+  see `awsemf` in `02-app.yaml` before adding labels, since each label
+  combination is billed.
+- **Alarms** (in each app stack, since they watch that app's load
+  balancer and ECS service): `<project>-5xx-errors` (5+ server errors from
+  the app or load balancer in 5 minutes) and `<project>-memory-high` (task
+  memory above 80% for 15 minutes).
+- **Traces:** X-Ray → Traces in `us-east-2`, or pick an environment's
+  group. Filter one release with `annotation.service_version = "<image
+  tag>"`. (Environment and version are searchable because the app copies
+  them onto every span — X-Ray only indexes span attributes, and this
+  ADOT build has no processor that could do it in the collector.)
 - **Safety:** the collector listens on `127.0.0.1` only (nothing outside
   the task can send it spans), is non-essential (if it fails the game
   keeps serving, and ECS restarts it), and is capped at 128 MB of the
   task's 512 MB. Measured locally: ~30 MB under load.
-- **Logs:** the collector's own logs are in the same log group as the
-  app's, under the `otel/` stream prefix.
+- **Logs:** the collector's own logs are in the app's log group, under
+  the `otel/` stream prefix.
 - **Turning it off:** remove the `otel-collector` container and the
   app's `OTEL_EXPORTER_OTLP_ENDPOINT` from `02-app.yaml`; the app then
   creates spans but exports none.
@@ -102,8 +113,9 @@ Two separate stages:
 
 ```bash
 cd infra/aws
-./build.sh     # Build: build the image, push it to ECR
-./deploy.sh    # Deploy: serve an image from ECR (the newest, by default)
+./deploy-observability.sh   # Once: the shared observability stack (see above)
+./build.sh                  # Build: build the image, push it to ECR
+./deploy.sh                 # Deploy: serve an image from ECR (the newest, by default)
 ```
 
 - **Build (`build.sh`)** makes sure the ECR repository stack exists,
@@ -160,6 +172,7 @@ check the Pricing Calculator link below for exact `us-east-2` numbers:
 | Application Load Balancer (base) | ~$0.0225/hr | ~$16 |
 | Fargate (0.25 vCPU / 0.5GB) | ~$0.045/hr combined | ~$9 |
 | X-Ray traces | first 100,000/month free, then $5/million | ~$0 |
+| CloudWatch dashboard (shared) | first 3 dashboards free, then $3/month | ~$0 |
 | CloudWatch custom metrics (7 series per running version) | ~$0.30/metric-month, prorated hourly | ~$2 |
 | CloudWatch alarms (3 metrics watched) | ~$0.10/metric-month | ~$0.30 |
 | **Total** | | **~$38-40/month** |
@@ -201,6 +214,14 @@ name or region:
 
 ```bash
 ./teardown.sh <project-name> <aws-region>   # defaults: snake-arena, us-east-2
+```
+
+`teardown.sh` leaves the shared observability stack alone (the other
+environment still uses it). To remove it too, once **both** app stacks
+are gone:
+
+```bash
+aws cloudformation delete-stack --stack-name snake-arena-observability --region us-east-2
 ```
 
 ## Environments: dev and prod
