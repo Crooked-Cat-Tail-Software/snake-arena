@@ -1466,3 +1466,48 @@ stages 20-21. Prod's canvas alarm never fired.
 
 **Outcome:** false positive (deliberate test traffic). No code changed.
 
+## Stage 24 — Incident drill: a realistic canvas bug, end to end
+
+**Asked:** introduce a realistic, reproducible bug in canvas component
+creation that fails for some requests while existing tests pass, so the
+alert and on-call response can be tested; then "run the drill for me".
+
+**Guardrails (Claude's defaults, stated up front):** the bug lived only on
+a local branch `drill/player-colors` (never pushed, never merged), was
+deployed to dev only (prod untouched; the human was warned that
+`promote.sh` ships whatever dev runs), and this log entry was written only
+after the drill, so the on-call agent couldn't read the answer.
+
+**The bug (`d0a3aac`, "Give each player their own snake color"):**
+`snakeColorsFor(playerName)` in `frontend/src/game.js` hashed `btoa(name)`
+into a hue. `btoa` throws for characters above U+00FF, so the `SnakeGame`
+constructor threw for names like `Łukasz`, `Dvořák`, `李明`, `Анна`, `🐍`
+(while `Donna`, `José`, `Zoë` worked) — the classic btoa/Unicode pitfall.
+All 44 tests passed (every test name is ASCII). Reproduced locally in
+headless Chromium for those 8 names before deploying.
+
+**Drill timeline (2026-10-09, UTC):** built `20261009-184002-d0a3aac`,
+deployed to dev; started `on-call-engineer/poll.py`; 18:45:50–53 three
+separate page loads in real Chromium tried to start a game as `Łukasz` —
+error panel each time, one 204 report each. 18:47:11 alarm fired; 18:47:43
+poller started the agent; 18:49:26 report written (≈ 3.5 min end to end).
+
+**Agent's report:** named the exact cause (`btoa(playerName)` in
+`snakeColorsFor`, commit `d0a3aac`) with high confidence; distinguished it
+from the stage 21/23 false alarms (full page loads of the *new* bundle, a
+new failure reason, began right after the deploy); recommended rolling
+dev back with the exact command, not promoting, fixing by hashing without
+`btoa` with a fallback to the old colors, and adding a non-ASCII-name
+Playwright test. Weaknesses: it inferred "may be a planned drill" from the
+branch name (a blind drill needs a neutral name), and it rightly noted the
+threshold counted one tester's three reloads as three players.
+
+**Recovery:** rolled dev back to `20261009-030525-6c375e2`; alarm OK at
+19:00:42; `Łukasz` then got a working board (page closed before game over,
+leaderboard still empty). Poller stopped, drill branch deleted locally.
+The drill image remains in dev's ECR repository (unused).
+
+**Follow-ups suggested, not done:** the agent's non-ASCII-name e2e test
+would catch this whole class of bug; the alarm can't tell one person
+reloading from several players.
+
