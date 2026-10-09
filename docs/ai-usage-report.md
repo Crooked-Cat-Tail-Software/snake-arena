@@ -1438,3 +1438,31 @@ ignored); untrusted sender with `X-Forwarded-For: 6.6.6.6` → 127.0.0.1
 `X-Forwarded-For: 6.6.6.6` was recorded in X-Ray's `ClientIp` (and dev's
 access log) as the requester's real public IP. Prod's RDS untouched.
 
+## Stage 23 — On-call investigation: canvas alert was a false positive
+
+**Asked:** act as on-call engineer for a fired alert — find the root
+cause, reproduce it, fix and commit only if it's a real bug; otherwise
+explain and change no code. No alarm details were given (the AWS session
+had expired; the human signed in again).
+
+**Found:** all six alarms OK. Since creation, the only firings were
+`snake-arena-canvas-creation-failures` on dev at 03:15 and 03:54 UTC
+(2026-10-09), each reset within 10 minutes — the two test fires from
+stages 20-21. Prod's canvas alarm never fired.
+
+**Evidence:**
+- X-Ray: every `POST /api/client-errors` ever received — 6 in dev, 0 in
+  prod — came from `curl/8.7.1`, in two bursts of 3 matching the test
+  fires. (They show the ALB's 10.0.x.x address because they predate the
+  stage 22 X-Forwarded-For fix.)
+- CloudWatch: 0 canvas failures in either environment from 04:00 UTC to
+  the time of the investigation (~18:30 UTC).
+- Reproduction: loaded deployed dev in a real browser; a canvas got a 2D
+  context; a started game drew the board (opaque background pixel), score
+  0, no error panel. Left the page after 0.4 s, before game over, so no
+  score was written (dev leaderboard confirmed still empty).
+- Code: the failure paths are covered by the two Playwright tests from
+  stage 20, which passed in CI on PR #5.
+
+**Outcome:** false positive (deliberate test traffic). No code changed.
+
