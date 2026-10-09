@@ -31,6 +31,8 @@ backend → frontend → tests, with a human review checkpoint after each.
       tests run in parallel, then the Docker Compose integration/e2e
       suite; a manually-triggered job deploys to AWS via a GitHub OIDC
       role (no stored credentials) and validates it via `/api/health`
+      — **deploy jobs blocked** until advanced features are activated
+      in AWS Settings (see "CI/CD" below); deploy with the scripts
 - [x] OpenTelemetry tracing in the backend — every span tagged with
       service name, environment, and deployed version (see
       "Telemetry" below)
@@ -312,8 +314,10 @@ traces to AWS X-Ray — see "Tracing" in
 the app on AWS: ECS Fargate for the container, managed RDS for Postgres,
 behind an Application Load Balancer. See
 [infra/aws/README.md](infra/aws/README.md) for the architecture, cost
-estimate, and how to build and deploy it (`./build.sh`, then `./deploy.sh`) and tear it back down
-(`./teardown.sh`) — like the Docker commands above, these are meant to
+estimate, and how to build and deploy it and tear it back down. From the
+repo root that's `infra/aws/build.sh`, then `infra/aws/deploy.sh` (and
+`infra/aws/teardown.sh`); `./build.sh` alone only works after `cd
+infra/aws` — like the Docker commands above, these are meant to
 be run by you, not by Claude, since deploying needs your own AWS
 credentials.
 
@@ -328,3 +332,10 @@ CI/CD section](infra/aws/README.md#cicd-github-actions) for the one-time
 setup (deploying the OIDC role, adding its ARN as a GitHub Actions
 variable) — that part still needs to be run by you, for the same reason
 as the AWS deploy itself.
+
+> **The CI deploy jobs don't work on this AWS project yet.** The managed
+> service control policy blocks creating the GitHub OIDC provider, so the
+> deploy role stacks were never created (`snake-arena-github-oidc` rolled
+> back on 2026-09-24). Activating advanced features in AWS Settings lifts
+> that. Until then, deploy and promote by running the `infra/aws/` scripts
+> yourself; the CI test jobs are unaffected.

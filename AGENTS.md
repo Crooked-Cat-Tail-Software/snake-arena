@@ -164,7 +164,11 @@ The OTel SDK (1.x) and contrib instrumentations (0.x betas) in
 traces go app → ADOT collector sidecar (`02-app.yaml`, bound to
 127.0.0.1) → X-Ray. Any new IAM role in `02-app.yaml` must also be added
 to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
-CI deploys fail with AccessDenied.
+CI deploys will fail with AccessDenied once they work. (They don't yet:
+the deploy role stacks can't be created on this AWS project until
+advanced features are activated -- see the "Blocked" note in
+`infra/aws/README.md`'s CI/CD section. Deploys are run locally with the
+`infra/aws/` scripts.)
 
 ## Conventions
 
@@ -284,6 +288,9 @@ CI deploys fail with AccessDenied.
       OIDC thumbprint was looked up fresh via web search against AWS's
       own security blog rather than recalled (a first, wrong recollection
       was caught this way before it reached the template). Human review
-      pending — push this to GitHub, do the one-time OIDC role setup in
+      pending — **update: the OIDC role stack can't be created on this
+      AWS project until advanced features are activated (managed SCP
+      denies `iam:*Provider*`), so CI deploys have never run; deploys
+      are done locally with the scripts.** Push this to GitHub, do the one-time OIDC role setup in
       `infra/aws/README.md`'s CI/CD section, and treat the first "Run
       workflow" click as the real test.

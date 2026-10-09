@@ -1087,3 +1087,19 @@ Collector used ~30 MB, app ~71 MB.
 **Not verified:** the real deploy and spans arriving in X-Ray; the
 account's plan check (`aws freetier get-account-plan-state`) — AWS
 sign-in had expired.
+
+**Correction (same day):** Claude's hand-off told the human to redeploy
+the two deploy-role stacks (`snake-arena-github-oidc`,
+`snake-arena-prod-github-oidc`) before the next CI deploy. That was
+wrong: neither stack has ever existed in a working state.
+`snake-arena-github-oidc` is in `ROLLBACK_COMPLETE` from 2026-09-24
+because the managed SCP denies `iam:CreateOpenIDConnectProvider` (already
+recorded in Stage 12 and `infra/aws/README.md` -- Claude missed it).
+Claude confirmed this from the stack's events. No action is needed until
+advanced features are activated; the `00-github-oidc.yaml` change stays,
+so the role is correct when that happens. Deploys continue locally via the
+scripts. Separately, `./build.sh` failed with "no such file" when run from
+the repo root -- the top-level README showed `./build.sh` without its
+`infra/aws/` path; fixed there. Docs updated: top-level `README.md` (CI
+block note, status, script paths), `infra/aws/README.md` (what to do once
+unblocked), `AGENTS.md`.

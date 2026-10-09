@@ -268,6 +268,13 @@ provider, not a stored access key.
 > on 2026-09-24. Per AWS's docs that policy is lifted by **activating
 > advanced features** in AWS Settings. Until then, build, deploy and
 > promote by running `build.sh`/`deploy.sh`/`promote.sh` locally; the CI test jobs are unaffected.
+>
+> Once advanced features are on: a stack in `ROLLBACK_COMPLETE` can't be
+> updated, so first delete it (`aws cloudformation delete-stack
+> --stack-name snake-arena-github-oidc --region us-east-2`), then follow
+> the steps below from the start. The template already includes
+> everything later changes need (e.g. the X-Ray task role), so there's no
+> separate "update the deploy role" step to catch up on.
 
 1. **Deploy the OIDC role** — this has to exist before the pipeline can
    authenticate at all, so it's a separate template you deploy yourself,
