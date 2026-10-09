@@ -152,6 +152,20 @@ database you care about; see `README.md`'s "Run the Docker integration
 tests" section for the full requirements and what each of the four tests
 checks.
 
+## Telemetry
+
+The backend is instrumented with OpenTelemetry (`backend/app/telemetry.py`,
+set up from `main.py`); see README.md's "Telemetry" section. When adding
+deploy paths, keep the three resource attributes flowing: `APP_VERSION`
+is baked into the image by `infra/aws/build.sh` (so promoted images keep
+their version); `APP_ENVIRONMENT` is set per deployment, never baked in.
+The OTel SDK (1.x) and contrib instrumentations (0.x betas) in
+`backend/requirements.txt` must be upgraded as a matched pair. On AWS,
+traces go app → ADOT collector sidecar (`02-app.yaml`, bound to
+127.0.0.1) → X-Ray. Any new IAM role in `02-app.yaml` must also be added
+to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
+CI deploys fail with AccessDenied.
+
 ## Conventions
 
 - Python: type hints on public functions, formatted with `black`, linted

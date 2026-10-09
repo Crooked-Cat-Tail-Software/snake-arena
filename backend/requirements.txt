@@ -5,3 +5,10 @@ psycopg2-binary>=2.9,<3.0
 pydantic>=2.7,<3.0
 pytest>=8.0,<9.0
 httpx>=0.27,<1.0
+# OpenTelemetry -- see app/telemetry.py. The SDK (1.x) and the contrib
+# instrumentations (0.x betas) are released in lockstep; keep the pairs
+# matched (1.45 <-> 0.66b1) when upgrading.
+opentelemetry-sdk==1.45.*
+opentelemetry-exporter-otlp-proto-http==1.45.*
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation-sqlalchemy==0.66b1

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from . import crud, schemas
 from .database import Base, engine, get_db
+from .telemetry import setup_telemetry
 
 Base.metadata.create_all(bind=engine)
 
@@ -27,6 +28,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# OpenTelemetry tracing: a span per request and per DB query, tagged with
+# service name, environment, and deployed version -- see telemetry.py.
+setup_telemetry(app, engine)
 
 
 @app.get("/api/health", response_model=schemas.HealthStatus, tags=["health"])

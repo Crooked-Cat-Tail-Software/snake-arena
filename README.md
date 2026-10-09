@@ -31,6 +31,9 @@ backend → frontend → tests, with a human review checkpoint after each.
       tests run in parallel, then the Docker Compose integration/e2e
       suite; a manually-triggered job deploys to AWS via a GitHub OIDC
       role (no stored credentials) and validates it via `/api/health`
+- [x] OpenTelemetry tracing in the backend — every span tagged with
+      service name, environment, and deployed version (see
+      "Telemetry" below)
 
 ## Requirements
 
@@ -274,6 +277,34 @@ That proves the code's logic is sound but does **not** prove the real
 please run `uv run pytest ../tests/integration -v` yourself with Docker
 Desktop running to get the first real pass/fail signal on these four
 tests.
+
+## Telemetry (OpenTelemetry)
+
+The backend emits OpenTelemetry traces — one span per API request and
+per database query (`backend/app/telemetry.py`). `/api/health` is not
+traced, since the load balancer polls it every few seconds. Every span
+carries three resource attributes:
+
+| Attribute | Comes from | Values |
+|---|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` | `snake-arena-backend` (default) |
+| `deployment.environment.name` | `APP_ENVIRONMENT` | `local` (default, docker compose), `dev`, `prod` (set by `deploy.sh`/`promote.sh` via the `DeploymentEnvironment` CloudFormation parameter) |
+| `service.version` | `APP_VERSION` | the image tag, e.g. `20261008-163457-89a430d`, baked in by `infra/aws/build.sh`; `local` otherwise |
+
+Where spans go is set with the standard OTel environment variables:
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` — export over
+  OTLP/HTTP to any OpenTelemetry collector.
+- `OTEL_TRACES_EXPORTER=console` — print spans to stdout, for local
+  debugging:
+  ```
+  OTEL_TRACES_EXPORTER=console uv run uvicorn app.main:app --port 8000
+  ```
+- Neither set (the default locally) — spans are created but not sent
+  anywhere.
+
+On AWS, the ECS task runs an ADOT collector sidecar that forwards
+traces to AWS X-Ray — see "Tracing" in
+[infra/aws/README.md](infra/aws/README.md) for where to view them.
 
 ## Deploy to AWS
 

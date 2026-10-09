@@ -62,7 +62,10 @@ echo "--> [2/3] Building the image (this is the same Dockerfile 'docker compose 
 # explicit platform, an Apple Silicon Mac builds an arm64 image that
 # Fargate can't start ("exec format error"), and the ECS service never
 # stabilizes.
-docker build --platform linux/amd64 -t "${REPO_URI}:${IMAGE_TAG}" "$REPO_ROOT"
+# APP_VERSION becomes service.version on every trace (see Dockerfile).
+docker build --platform linux/amd64 \
+  --build-arg APP_VERSION="$IMAGE_TAG" \
+  -t "${REPO_URI}:${IMAGE_TAG}" "$REPO_ROOT"
 echo
 
 echo "--> [3/3] Pushing to ECR..."

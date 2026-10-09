@@ -998,3 +998,92 @@ local and CI tags sort together); 7-character short SHA (matches the
 example); dirty-tree refusal.
 
 **Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean.
+
+## Stage 15 — OpenTelemetry instrumentation
+
+**Asked:** instrument the backend with OpenTelemetry, including service
+name, environment, and deployed version in the telemetry.
+
+**Generated/changed:**
+- `backend/app/telemetry.py` (new) — tracer provider whose resource
+  carries `service.name` (`OTEL_SERVICE_NAME`, default
+  `snake-arena-backend`), `deployment.environment.name` plus the legacy
+  `deployment.environment` (`APP_ENVIRONMENT`, default `local`), and
+  `service.version` (`APP_VERSION`, default `local`). Auto-instruments
+  FastAPI (excluding `/api/health`) and SQLAlchemy. Exports over
+  OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, to stdout with
+  `OTEL_TRACES_EXPORTER=console`, otherwise nowhere.
+- `backend/app/main.py` — calls `setup_telemetry(app, engine)`.
+- `backend/requirements.txt` — OTel SDK 1.45 / instrumentations 0.66b1
+  (released in lockstep; pinned as a matched pair).
+- `Dockerfile` — `ARG/ENV APP_VERSION`; `infra/aws/build.sh` passes the
+  image tag. Baked into the image so `promote.sh`, which ships dev's exact
+  image, carries the version to prod.
+- `infra/aws/02-app.yaml` — new `DeploymentEnvironment` parameter
+  (`dev`/`prod`) → `APP_ENVIRONMENT` on the container. `deploy.sh`
+  derives it from the project name (`-prod` suffix → `prod`);
+  `promote.sh` passes `prod` explicitly.
+- `docker-compose.yml` — `APP_ENVIRONMENT: local`.
+- `tests/test_telemetry.py` (new, 4 tests) — resource attributes from env
+  and defaults; a real request produces a server span with all three;
+  health checks produce no request span.
+- Docs: `README.md` ("Telemetry"), `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** traces only (no metrics
+or logs yet); health checks excluded; one service name for dev and prod,
+told apart by environment (the OTel convention); environment values
+`dev`/`prod` matching stack names; no telemetry backend chosen yet — on
+AWS spans are currently not exported anywhere.
+
+**Verified:** full fast suite 19/19 passing against real Postgres;
+`cfn-lint`, `shellcheck`, `docker compose config` clean; built the real
+image with `--build-arg APP_VERSION=20261008-000000-testsha`, ran it with
+`APP_ENVIRONMENT=dev` and the console exporter, and confirmed all 7 spans
+from one `GET /api/scores` (request, SQL, connect) carried all three
+attributes, with no span for the startup health-check polls.
+
+**Not verified:** a real AWS deploy with these changes (needs your
+credentials), and export to a real collector.
+
+## Stage 16 — Send traces to AWS X-Ray (ADOT collector sidecar)
+
+**Asked:** "yes" to Claude's suggestion to forward the Stage 15 traces to
+X-Ray via an ADOT collector sidecar on ECS.
+
+**Generated/changed:**
+- `infra/aws/02-app.yaml` — new `otel-collector` container
+  (`aws-otel-collector:v0.50.0`, pinned via the `CollectorImage`
+  parameter; latest release, checked against GitHub and public ECR):
+  OTLP/HTTP receiver on 127.0.0.1:4318, memory limiter + batch, `awsxray`
+  exporter with `deployment.environment.name` and `service.version`
+  indexed as annotations. Non-essential, 128 MB hard cap, restart policy,
+  `/healthcheck` health check, logs under the `otel/` prefix. App
+  container gets `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` and
+  depends on the collector having *started* (not being healthy).
+  New `TaskRole` (`<project>-ecs-task-role`): `xray:PutTraceSegments` and
+  `xray:PutTelemetryRecords` only; trust limited by `aws:SourceAccount` /
+  `aws:SourceArn`.
+- `infra/aws/00-github-oidc.yaml` — deploy role may manage/pass the new
+  task role (by exact name), alongside the execution role.
+- Docs: `infra/aws/README.md` (architecture, new "Tracing" section, cost,
+  deploy-role scope), `README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** kept the 512 MB task
+size rather than raising it to 1024 as first suggested — `aws
+cloudformation deploy` keeps an existing stack's previous parameter
+values, so a new default wouldn't reach the existing stacks, and the
+measurement below showed it isn't needed. No X-Ray centralized sampling
+(every request is traced; fine at this traffic, free tier covers it).
+
+**Verified:** `cfn-lint` clean on both templates. Ran the real
+`aws-otel-collector:v0.50.0` image locally with the exact config from the
+template and a 128 MB limit: config accepted, `/healthcheck` returned 200
+with the 127.0.0.1 binding. Ran the app image in the collector's network
+namespace (as in a Fargate task) and sent 200 requests: 1,002 spans
+reached the X-Ray exporter, whose only error was "get credentials" (no
+AWS credentials locally — on Fargate the task role supplies them).
+Collector used ~30 MB, app ~71 MB.
+
+**Not verified:** the real deploy and spans arriving in X-Ray; the
+account's plan check (`aws freetier get-account-plan-state`) — AWS
+sign-in had expired.

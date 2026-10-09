@@ -72,12 +72,13 @@ docker push "$TARGET_IMAGE"
 echo
 
 echo "--> [4/5] Updating the prod app stack to run $IMAGE_TAG..."
-# DBDeletionProtection stays "true" -- this script only ever targets prod.
+# DBDeletionProtection stays "true" and DeploymentEnvironment is "prod" --
+# this script only ever targets prod.
 aws cloudformation deploy \
   --stack-name "${TARGET_PROJECT}-app" \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$TARGET_PROJECT" ImageUri="$TARGET_IMAGE" \
-    DBDeletionProtection=true \
+    DBDeletionProtection=true DeploymentEnvironment=prod \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$AWS_REGION"

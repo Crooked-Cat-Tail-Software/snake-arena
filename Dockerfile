@@ -43,5 +43,14 @@ COPY --from=frontend /frontend/dist ./static
 # since there's no Postgres reachable at "db" without it.
 ENV DATABASE_URL=postgresql://snake_arena:snake_arena@db:5432/snake_arena
 
+# Deployed version, reported on every trace as service.version (see
+# backend/app/telemetry.py). infra/aws/build.sh passes the image tag
+# (YYYYMMDD-HHMMSS-shortsha) here; plain `docker build`/compose builds get
+# "local". Baked into the image, not set at deploy time, so promote.sh --
+# which ships dev's exact image to prod -- carries the same version along.
+# Declared late so changing it doesn't invalidate the layers above.
+ARG APP_VERSION=local
+ENV APP_VERSION=${APP_VERSION}
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -19,7 +19,7 @@ your own AWS credentials.
                     [Application Load Balancer]  (public subnets, port 80)
                             |
                     [ECS Fargate task]  (backend + built frontend, port 8000)
-                            |
+                            |    + ADOT collector sidecar --> AWS X-Ray (traces)
                     [RDS Postgres]  (not publicly reachable -- only the
                                       ECS task's security group can reach it)
 ```
@@ -44,6 +44,28 @@ variables the task definition sets, instead of a single `DATABASE_URL`
 (which isn't knowable until the RDS instance exists) -- this is on top
 of, not instead of, the existing `DATABASE_URL` support used locally and
 by `docker-compose.yml`.
+
+### Tracing (AWS X-Ray)
+
+The ECS task runs two containers: the app, and an AWS Distro for
+OpenTelemetry (ADOT) collector sidecar. The app sends its OpenTelemetry
+traces (see "Telemetry" in the top-level README) to the collector on
+`localhost:4318`; the collector forwards them to X-Ray using the task
+role `<project>-ecs-task-role`, which can only write traces.
+
+- **Where to look:** CloudWatch console → Application Signals → Traces
+  (or X-Ray → Traces), in `us-east-2`. Filter one environment with
+  `annotation.deployment_environment_name = "prod"`, or one release with
+  `annotation.service_version = "<image tag>"`.
+- **Safety:** the collector listens on `127.0.0.1` only (nothing outside
+  the task can send it spans), is non-essential (if it fails the game
+  keeps serving, and ECS restarts it), and is capped at 128 MB of the
+  task's 512 MB. Measured locally: ~30 MB under load.
+- **Logs:** the collector's own logs are in the same log group as the
+  app's, under the `otel/` stream prefix.
+- **Turning it off:** remove the `otel-collector` container and the
+  app's `OTEL_EXPORTER_OTLP_ENDPOINT` from `02-app.yaml`; the app then
+  creates spans but exports none.
 
 ## Prerequisites
 
@@ -116,9 +138,12 @@ check the Pricing Calculator link below for exact `us-east-2` numbers:
 | RDS storage (20GB gp3) | ~$0.115/GB-month | ~$2 |
 | Application Load Balancer (base) | ~$0.0225/hr | ~$16 |
 | Fargate (0.25 vCPU / 0.5GB) | ~$0.045/hr combined | ~$9 |
+| X-Ray traces | first 100,000/month free, then $5/million | ~$0 |
 | **Total** | | **~$38-40/month** |
 
-That excludes ALB data-processing charges and data transfer, which are
+The ADOT collector sidecar fits in the existing task size, so it adds no
+Fargate cost; at this game's traffic X-Ray stays inside its free monthly
+allowance. That excludes ALB data-processing charges and data transfer, which are
 usually small for a class exercise but not exactly zero. Two things can
 reduce this a lot:
 
@@ -339,8 +364,9 @@ Environment named `production` that requires approval.
 `00-github-oidc.yaml`'s IAM policy is scoped to exactly what
 `deploy.sh` needs: push images to this project's ECR repo, create/update
 the two `snake-arena-ecr`/`snake-arena-app` CloudFormation stacks, and
-manage the one IAM role (`snake-arena-ecs-execution-role`) those stacks
-create — it cannot touch any other IAM role, user, or resource outside
+manage the two IAM roles (`snake-arena-ecs-execution-role` and
+`snake-arena-ecs-task-role`, the X-Ray-write-only role the tracing
+collector uses) those stacks create — it cannot touch any other IAM role, user, or resource outside
 those two stacks. The VPC/RDS/ECS/ALB permissions are necessarily
 broader than a single resource ARN, since AWS doesn't support
 resource-level restrictions for most of those services' *create*

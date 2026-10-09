@@ -28,11 +28,16 @@ AWS_REGION="${2:-us-east-2}"
 DB_DELETION_PROTECTION="${3:-false}"
 IMAGE_TAG="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Reported on every trace as deployment.environment.name.
+case "$PROJECT_NAME" in
+  *-prod) DEPLOY_ENV=prod ;;
+  *) DEPLOY_ENV=dev ;;
+esac
 
 command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and sign in first."; exit 1; }
 
 echo "== Snake Arena deploy =="
-echo "Project: $PROJECT_NAME   Region: $AWS_REGION   DB deletion protection: $DB_DELETION_PROTECTION"
+echo "Project: $PROJECT_NAME ($DEPLOY_ENV)   Region: $AWS_REGION   DB deletion protection: $DB_DELETION_PROTECTION"
 echo
 
 echo "--> [1/3] Finding the image in ECR..."
@@ -74,7 +79,7 @@ aws cloudformation deploy \
   --stack-name "${PROJECT_NAME}-app" \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="$IMAGE_URI" \
-    DBDeletionProtection="$DB_DELETION_PROTECTION" \
+    DBDeletionProtection="$DB_DELETION_PROTECTION" DeploymentEnvironment="$DEPLOY_ENV" \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$AWS_REGION"

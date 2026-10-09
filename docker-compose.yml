@@ -42,6 +42,10 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://snake_arena:snake_arena@db:5432/snake_arena
+      # Reported on every trace as deployment.environment.name -- see
+      # backend/app/telemetry.py. Add OTEL_TRACES_EXPORTER: console here
+      # to print spans to `docker compose logs backend`.
+      APP_ENVIRONMENT: local
 
 volumes:
   # Persists Postgres data across `docker compose down`/`up` cycles. Use
