@@ -1432,3 +1432,9 @@ runbook step 4 now names X-Ray's `ClientIp` and `UserAgent`. Description
 ignored); untrusted sender with `X-Forwarded-For: 6.6.6.6` → 127.0.0.1
 (header ignored). `cfn-lint` clean.
 
+**Deployed (human approved: commit, dev, verify, prod):** committed
+`8c092ef`; redeployed dev and promoted prod (same image,
+`20261009-030525-6c375e2`). On both, a read-only request sent with a fake
+`X-Forwarded-For: 6.6.6.6` was recorded in X-Ray's `ClientIp` (and dev's
+access log) as the requester's real public IP. Prod's RDS untouched.
+
