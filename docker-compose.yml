@@ -47,6 +47,36 @@ services:
       # to print spans to `docker compose logs backend`.
       APP_ENVIRONMENT: local
 
+  # Optional local Grafana with the Snake Arena dashboard, reading the
+  # game metrics from CloudWatch. Not started by a plain `docker compose
+  # up` (it's in the "monitoring" profile) -- start it with
+  # grafana/start.sh. It signs in to AWS with your `aws login` session
+  # (renewing its short-lived credentials itself, like the AWS CLI), so it
+  # keeps working until that session ends.
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: ["monitoring"]
+    ports:
+      # This machine only: the container holds your AWS credentials.
+      - "127.0.0.1:3000:3000"
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_REGION: us-east-2
+      # No login needed locally (Editor, so Explore works too).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/snake-arena.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Only your AWS profile settings and `aws login` session (writable,
+      # so renewed credentials can be cached) -- not ~/.aws/credentials,
+      # which can hold long-lived keys. Grafana looks for .aws in its
+      # install directory, not $HOME.
+      - ${HOME}/.aws/config:/usr/share/grafana/.aws/config:ro
+      - ${HOME}/.aws/login:/usr/share/grafana/.aws/login
+
 volumes:
   # Persists Postgres data across `docker compose down`/`up` cycles. Use
   # `docker compose down -v` if you want a clean leaderboard instead.

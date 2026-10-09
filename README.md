@@ -298,6 +298,23 @@ emits five game metrics (`backend/app/game_metrics.py`):
 Never label a metric by player name: on CloudWatch every distinct label
 combination is a separately billed metric.
 
+### Grafana dashboard
+
+A local Grafana with a "Snake Arena — game metrics" dashboard reads these
+metrics from CloudWatch, filterable by **environment** and **deployed
+version** (one, several, or All). From the repo root, after `aws login`:
+```
+grafana/start.sh
+```
+Then open http://localhost:3000. It uses your `aws login` session and
+renews its credentials itself; when that session ends, run `aws login`
+again (no restart needed). Stop it with `docker compose --profile
+monitoring stop grafana`. The dashboard is `grafana/dashboards/
+snake-arena.json` — edit it in Grafana, then export the JSON and replace
+that file to keep the change (UI-only edits are lost when the container
+is recreated). Grafana only listens on this machine (127.0.0.1), and a
+plain `docker compose up` doesn't start it.
+
 All traces and metrics carry three resource attributes:
 
 | Attribute | Comes from | Values |

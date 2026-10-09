@@ -483,7 +483,10 @@ Resources:
                   # the declarations below are published, each with only
                   # the listed dimensions (every dimension combination is a
                   # separately billed metric; rollups and per-task IDs
-                  # would multiply that).
+                  # would multiply that). service.version is a dimension so
+                  # dashboards can filter by release; each deploy starts new
+                  # series and the old ones stop, so the billed count stays
+                  # ~flat. Totals across versions are summed at query time.
                   awsemf:
                     region: ${AWS::Region}
                     namespace: SnakeArena
@@ -493,13 +496,13 @@ Resources:
                     resource_to_telemetry_conversion:
                       enabled: true
                     metric_declarations:
-                      - dimensions: [[deployment.environment.name]]
+                      - dimensions: [[deployment.environment.name, service.version]]
                         metric_name_selectors:
                           - "^scores[.]submitted$"
                           - "^scores[.]value$"
                           - "^leaderboard[.]reads$"
                           - "^leaderboard[.]new_top_score$"
-                      - dimensions: [[deployment.environment.name, reason]]
+                      - dimensions: [[deployment.environment.name, service.version, reason]]
                         metric_name_selectors:
                           - "^scores[.]rejected$"
                 service:

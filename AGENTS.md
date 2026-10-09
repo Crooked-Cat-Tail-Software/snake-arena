@@ -166,7 +166,10 @@ traces go app → ADOT collector sidecar (`02-app.yaml`, bound to
 the same collector → CloudWatch (`SnakeArena`). Metric labels must stay
 low-cardinality (never player names); a new metric or label also needs
 a matching `metric_declarations` entry in the collector config, or it is
-silently not published. Any new IAM role in `02-app.yaml` must also be added
+silently not published. Metrics are published with dimensions
+environment + `service.version` (+ `reason`); the local Grafana dashboard
+(`grafana/`, `docker compose --profile monitoring`) sums across versions,
+so keep those dimension sets in step with its queries. Any new IAM role in `02-app.yaml` must also be added
 to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
 CI deploys will fail with AccessDenied once they work. (They don't yet:
 the deploy role stacks can't be created on this AWS project until

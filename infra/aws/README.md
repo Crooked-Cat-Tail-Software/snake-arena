@@ -56,8 +56,11 @@ metrics to CloudWatch using the task role `<project>-ecs-task-role`, which
 can only write traces and write to the `/ecs/<project>/metrics` log group.
 
 - **Metrics:** CloudWatch → Metrics → `SnakeArena` namespace, one series
-  per environment (`deployment.environment.name`), plus `reason` on
-  `scores.rejected`. They arrive about once a minute. For
+  per environment (`deployment.environment.name`) and deployed version
+  (`service.version`), plus `reason` on `scores.rejected`. Each deploy
+  starts new series and the old version's stop, so the billed count stays
+  about flat; totals across versions are summed at query time (the
+  Grafana dashboard does this — see the top-level README). They arrive about once a minute. For
   `scores.value`, the `p50` statistic is the median score. The collector
   writes them as Embedded Metric Format records to
   `/ecs/<project>/metrics` (kept 7 days; the metrics themselves are kept
@@ -157,7 +160,7 @@ check the Pricing Calculator link below for exact `us-east-2` numbers:
 | Application Load Balancer (base) | ~$0.0225/hr | ~$16 |
 | Fargate (0.25 vCPU / 0.5GB) | ~$0.045/hr combined | ~$9 |
 | X-Ray traces | first 100,000/month free, then $5/million | ~$0 |
-| CloudWatch custom metrics (7 series) | ~$0.30/metric-month | ~$2 |
+| CloudWatch custom metrics (7 series per running version) | ~$0.30/metric-month, prorated hourly | ~$2 |
 | CloudWatch alarms (3 metrics watched) | ~$0.10/metric-month | ~$0.30 |
 | **Total** | | **~$38-40/month** |
 

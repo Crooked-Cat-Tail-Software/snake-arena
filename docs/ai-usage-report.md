@@ -1162,3 +1162,66 @@ new #1s, 1 read, 1 rejection per reason, a bad `?limit=` not counted);
 **Not verified:** a real deploy — metrics arriving in CloudWatch, the
 task role's log permissions being sufficient, alarms evaluating, and the
 SNS email flow.
+
+## Stage 18 — Grafana dashboard, filterable by environment and version
+
+**Asked:** add a Grafana panel with the game metrics, filterable by
+environment and deployed version.
+
+**Found first:** Amazon Managed Grafana is denied on this AWS project by
+the managed SCP (`grafana:ListWorkspaces` explicit deny) — it would need
+advanced features. The human chose **local Grafana** over Grafana Cloud
+or a JSON file only. Also: metrics had only the environment dimension, so
+version filtering needed a collector change.
+
+**Generated/changed:**
+- `infra/aws/02-app.yaml` — `awsemf` dimension sets are now environment +
+  `service.version` (+ `reason`). Not both sets: that would double the
+  metric cost for no new information; Grafana sums across versions.
+- `docker-compose.yml` — `grafana` service (`grafana/grafana:13.2.2`;
+  13.2.3 was <2 weeks old), in a `monitoring` profile so plain `up` and
+  the integration tests are unaffected; port bound to 127.0.0.1;
+  anonymous Editor access; mounts only `~/.aws/config` (read-only) and
+  `~/.aws/login` (the `aws login` session) — not `~/.aws/credentials`.
+- `grafana/start.sh` — checks for a valid session, starts the service.
+- `grafana/provisioning/` — CloudWatch data source (`us-east-2`) and the
+  dashboard provider. `grafana/dashboards/snake-arena.json` — variables
+  `env` (single) and `version` (multi, All = `*`), 4 stat panels (totals
+  summed across the selected versions) and 4 time series (games by
+  version; median/p90/max score; rejections by reason; leaderboard
+  activity).
+- Docs: `README.md` ("Grafana dashboard"), `infra/aws/README.md`,
+  `AGENTS.md`.
+
+**Approach changed during the work:** Claude first passed credentials
+exported with `aws configure export-credentials` as environment variables.
+They expire after ~15 minutes (the `aws login` credential lifetime), so
+the dashboard would have needed a restart every 15 minutes. Tested
+instead whether Grafana's AWS SDK supports `login_session` profiles: with
+`~/.aws/config` + `~/.aws/login` mounted, the data source health check
+passes; with nothing mounted it fails ("failed to get shared config
+profile"), so the pass is real. (Grafana reads `.aws` from
+`/usr/share/grafana`, not `$HOME`.) Renewal confirmed: at 01:54 UTC,
+with no AWS CLI calls since ~01:37 (so nothing else could have refreshed
+the shared session files past the ~15-minute credential lifetime),
+Grafana still queried CloudWatch successfully.
+
+**Bug caught in verification:** the variable queries had an empty metric
+name, which CloudWatch `ListMetrics` rejects (`InvalidParameterValue`) —
+fixed by using `leaderboard.reads`.
+
+**Verified (with the human's permission to update dev):** deployed dev
+with the same image (`20261009-012240-a77d729`); made read-only
+leaderboard requests and two invalid score submissions (422, nothing
+saved; dev leaderboard confirmed empty). In a real browser: Environment
+lists `dev`; Version lists the running tag; with Version = All and with
+the single tag selected, Leaderboard reads showed 9 (12 sent; the newest
+minute not yet exported) and the series are labelled by version. A
+minute later: 13 reads (the 12 plus one leaderboard check) and 2
+rejections split `player_name` / `score` — every count exact. The 401s in
+the browser console are only `/api/user/stars` (anonymous users can't
+star dashboards). Fixed after seeing it: chart y-axes auto-scaled from
+~1, visually exaggerating differences; pinned to 0.
+
+**Not verified:** the games/score panels (needs real games — no fake
+scores were written to dev); prod (not redeployed).
