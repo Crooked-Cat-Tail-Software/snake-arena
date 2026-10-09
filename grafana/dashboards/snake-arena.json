@@ -1,0 +1,807 @@
+{
+  "uid": "snake-arena",
+  "title": "Snake Arena \u2014 game metrics",
+  "tags": [
+    "snake-arena"
+  ],
+  "description": "Game metrics from CloudWatch (namespace SnakeArena), filterable by environment and deployed version.",
+  "timezone": "browser",
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "editable": true,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "cloudwatch",
+          "uid": "cloudwatch"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": {
+          "refId": "env",
+          "queryType": "dimensionValues",
+          "namespace": "SnakeArena",
+          "region": "default",
+          "metricName": "leaderboard.reads",
+          "dimensionKey": "deployment.environment.name",
+          "dimensionFilters": {}
+        },
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "version",
+        "label": "Version",
+        "type": "query",
+        "datasource": {
+          "type": "cloudwatch",
+          "uid": "cloudwatch"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": {
+          "refId": "version",
+          "queryType": "dimensionValues",
+          "namespace": "SnakeArena",
+          "region": "default",
+          "metricName": "leaderboard.reads",
+          "dimensionKey": "service.version",
+          "dimensionFilters": {
+            "deployment.environment.name": "$env"
+          }
+        },
+        "multi": true,
+        "includeAll": true,
+        "current": {},
+        "options": [],
+        "allValue": "*"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Games finished",
+      "description": "Accepted scores in the time range, all selected versions.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.submitted",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "reduceRow",
+            "reduce": {
+              "reducer": "sum"
+            },
+            "replaceFields": true,
+            "alias": "Games finished"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "0",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "New #1 scores",
+      "description": "Scores that beat every earlier score.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "leaderboard.new_top_score",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "reduceRow",
+            "reduce": {
+              "reducer": "sum"
+            },
+            "replaceFields": true,
+            "alias": "New #1 scores"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "0",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": []
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Leaderboard reads",
+      "description": "Leaderboard requests.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "leaderboard.reads",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "reduceRow",
+            "reduce": {
+              "reducer": "sum"
+            },
+            "replaceFields": true,
+            "alias": "Leaderboard reads"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "0",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          }
+        },
+        "overrides": []
+      },
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Rejected submissions",
+      "description": "Score submissions that failed validation, any reason.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.rejected",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version",
+            "reason": "*"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "reduceRow",
+            "reduce": {
+              "reducer": "sum"
+            },
+            "replaceFields": true,
+            "alias": "Rejected submissions"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "0",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          }
+        },
+        "overrides": []
+      },
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Games finished by version",
+      "description": "Accepted scores per period, stacked by deployed version.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.submitted",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Scores by version",
+      "description": "Median (p50), p90 and highest accepted score per period.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.value",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "p50",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')} median"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.value",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "p90",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')} p90"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.value",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Maximum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.service.version')} max"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Rejected submissions by reason",
+      "description": "player_name / score = failed validation on that field; malformed = unreadable request.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "scores.rejected",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version",
+            "reason": "*"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.reason')} (${PROP('Dim.service.version')})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Leaderboard activity",
+      "description": "Leaderboard reads and new #1 scores per period.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "leaderboard.reads",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "reads (${PROP('Dim.service.version')})"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "leaderboard.new_top_score",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "new #1 (${PROP('Dim.service.version')})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "id": 8
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Canvas creation failures (players who couldn't start a game)",
+      "description": "Page loads whose game canvas couldn't start, by reason. Alarm: 3+ in 10 minutes.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "client.canvas_creation_failures",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version",
+            "reason": "*"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.reason')} (${PROP('Dim.service.version')})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

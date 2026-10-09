@@ -79,6 +79,16 @@ complete, working slice over feature breadth.
 - A simple endpoint the frontend (or a human) can hit to confirm the
   backend and its database connection are up.
 
+### 5.5 Client error reporting
+- If the game board (the `<canvas>`) can't be created or started when a
+  game begins, the player sees a clear message instead of a blank board,
+  and the frontend reports it once per page load to
+  `POST /api/client-errors` with a fixed `kind` and `reason` (no free
+  text, no player name).
+- The backend stores nothing; it counts the report in a monitoring
+  metric. An alarm fires when 3 or more failures happen within 10
+  minutes in one environment -- see `infra/aws/02-app.yaml`.
+
 ## 6. Data model
 
 Single table, `scores`:
@@ -101,6 +111,7 @@ the storage engine is different.
 - `GET /api/health` → `{ status: "ok" }`
 - `POST /api/scores` → body `{ player_name, score }` → 201 + stored record
 - `GET /api/scores?limit=10` → array of top scores, highest first
+- `POST /api/client-errors` → body `{ kind, reason }` → 204 (counted, not stored)
 
 CORS is enabled on the backend for local development (frontend and backend
 run on different localhost ports).

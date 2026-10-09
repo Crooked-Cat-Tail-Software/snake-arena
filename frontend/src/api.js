@@ -37,3 +37,16 @@ export async function checkHealth() {
     return false;
   }
 }
+
+// Reports a failure that happened in this browser (POST /api/client-errors)
+// so it can be monitored and alerted on. Fire-and-forget: never throws and
+// never blocks the UI -- a failed report must not make things worse for
+// the player.
+export function reportClientError(kind, reason) {
+  fetch(`${API_BASE_URL}/api/client-errors`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, reason }),
+    keepalive: true,
+  }).catch(() => {});
+}

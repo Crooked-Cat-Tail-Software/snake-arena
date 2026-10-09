@@ -31,6 +31,15 @@ Parameters:
     Default: snake_arena
     Description: RDS master username. Matches the app's expected DB_USER.
 
+  DeploymentEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: ["dev", "prod"]
+    Description: >
+      Reported on every trace as deployment.environment.name (see
+      backend/app/telemetry.py). deploy.sh sets this from the project name
+      (a "-prod" suffix means prod); promote.sh always passes prod.
+
   DBName:
     Type: String
     Default: snake_arena
@@ -63,6 +72,29 @@ Parameters:
     Type: Number
     Default: 1
     Description: Number of running copies of the app. 1 is enough for a class exercise; the leaderboard lives in RDS, not in the container, so this can scale later without code changes.
+
+  CollectorImage:
+    Type: String
+    Default: public.ecr.aws/aws-observability/aws-otel-collector:v0.50.0
+    Description: >
+      AWS Distro for OpenTelemetry (ADOT) collector, run as a sidecar that
+      forwards the app's traces to AWS X-Ray. Pinned to a release; must be
+      v0.34.0 or newer (older versions silently drop W3C-format trace IDs).
+
+  AlertOwner:
+    Type: String
+    Default: dbrown77
+    Description: >
+      Who responds to this app's alerts. Shown in the alert text (and the
+      notification email) and set as the alarm's "owner" tag.
+
+  ObservabilityStackName:
+    Type: String
+    Default: snake-arena-observability
+    Description: >
+      The shared observability stack (01-observability.yaml) this app sends
+      its metrics and alarm notifications to. Deploy it first -- deploy.sh
+      checks. Shared by dev and prod.
 
   DBDeletionProtection:
     Type: String
@@ -304,6 +336,51 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: !GetAtt DBInstance.MasterUserSecret.SecretArn
 
+  # Role the running containers use (unlike ExecutionRole, which ECS
+  # itself uses to start them). Only the ADOT collector needs AWS access:
+  # writing traces to X-Ray and metrics to the shared metrics log group.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-task-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            # Only ECS tasks in this account can assume it (confused-deputy
+            # protection).
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: WriteTracesToXRay
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                # X-Ray's write actions don't support resource-level scoping.
+                Resource: "*"
+        - PolicyName: WriteMetricsToCloudWatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                # The shared metrics log group (01-observability.yaml).
+                Resource:
+                  Fn::ImportValue: !Sub "${ObservabilityStackName}-MetricsLogGroupArn"
+
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -314,6 +391,7 @@ Resources:
       Cpu: !Ref ContainerCpu
       Memory: !Ref ContainerMemory
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       # Must match the platform deploy.sh builds the image for.
       RuntimePlatform:
         OperatingSystemFamily: LINUX
@@ -335,6 +413,28 @@ Resources:
               Value: !GetAtt DBInstance.Endpoint.Port
             - Name: DB_NAME
               Value: !Ref DBName
+            # Trace resource attributes -- see backend/app/telemetry.py.
+            # service.version comes from APP_VERSION, baked into the image
+            # by build.sh, so it isn't set here.
+            - Name: APP_ENVIRONMENT
+              Value: !Ref DeploymentEnvironment
+            # Trust X-Forwarded-For only from inside the VPC (the ALB --
+            # the only thing ECSSecurityGroup lets reach port 8000), so logs
+            # and X-Ray record the real client IP instead of the ALB's
+            # 10.0.x.x address. uvicorn reads the header right to left and
+            # takes the first untrusted address, which is the one the ALB
+            # appended, so a client-supplied X-Forwarded-For can't spoof it.
+            - Name: FORWARDED_ALLOW_IPS
+              Value: !Ref VpcCidr
+            # The collector sidecar below -- containers in one Fargate task
+            # share localhost.
+            - Name: OTEL_EXPORTER_OTLP_ENDPOINT
+              Value: http://localhost:4318
+          DependsOn:
+            # START, not HEALTHY: the game must come up even if the
+            # collector can't (tracing is best-effort).
+            - ContainerName: otel-collector
+              Condition: START
           Secrets:
             - Name: DB_USER
               ValueFrom: !Sub "${DBInstance.MasterUserSecret.SecretArn}:username::"
@@ -346,6 +446,100 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
+        # ADOT collector sidecar: receives the app's OTLP traces and
+        # forwards them to X-Ray. Listens on 127.0.0.1 only, so nothing
+        # outside this task can send it spans. Non-essential and capped at
+        # 128 MB, so a collector problem can't take the game down or starve
+        # it of memory; ECS restarts it if it exits.
+        - Name: otel-collector
+          Image: !Ref CollectorImage
+          Essential: false
+          Memory: 128
+          RestartPolicy:
+            Enabled: true
+          Environment:
+            - Name: AOT_CONFIG_CONTENT
+              Value: !Sub
+                - |
+                  extensions:
+                    health_check:
+                      endpoint: 127.0.0.1:13133
+                  receivers:
+                    otlp:
+                      protocols:
+                        http:
+                          endpoint: 127.0.0.1:4318
+                  processors:
+                    memory_limiter:
+                      check_interval: 5s
+                      limit_mib: 100
+                      spike_limit_mib: 25
+                    batch: {}
+                  exporters:
+                    awsxray:
+                      region: ${AWS::Region}
+                      # Searchable in X-Ray as annotations
+                      # (deployment_environment_name, service_version). Only
+                      # *span* attributes are indexed -- the app copies these
+                      # two resource attributes onto every span (see
+                      # backend/app/telemetry.py), since this ADOT build has
+                      # no transform processor to do it here.
+                      indexed_attributes:
+                        - deployment.environment.name
+                        - service.version
+                    # Game metrics -> CloudWatch, namespace SnakeArena. Only
+                    # the declarations below are published, each with only
+                    # the listed dimensions (every dimension combination is a
+                    # separately billed metric; rollups and per-task IDs
+                    # would multiply that). service.version is a dimension so
+                    # dashboards can filter by release; each deploy starts new
+                    # series and the old ones stop, so the billed count stays
+                    # ~flat. Totals across versions are summed at query time.
+                    awsemf:
+                      region: ${AWS::Region}
+                      namespace: SnakeArena
+                      # Shared with the other environment (one stream each).
+                      log_group_name: ${MetricsLogGroupName}
+                      log_stream_name: ${ProjectName}
+                      dimension_rollup_option: NoDimensionRollup
+                      resource_to_telemetry_conversion:
+                        enabled: true
+                      metric_declarations:
+                        - dimensions: [[deployment.environment.name, service.version]]
+                          metric_name_selectors:
+                            - "^scores[.]submitted$"
+                            - "^scores[.]value$"
+                            - "^leaderboard[.]reads$"
+                            - "^leaderboard[.]new_top_score$"
+                        - dimensions: [[deployment.environment.name, service.version, reason]]
+                          metric_name_selectors:
+                            - "^scores[.]rejected$"
+                            - "^client[.]canvas_creation_failures$"
+                  service:
+                    extensions: [health_check]
+                    pipelines:
+                      traces:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [awsxray]
+                      metrics:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [awsemf]
+                - MetricsLogGroupName:
+                    Fn::ImportValue: !Sub "${ObservabilityStackName}-MetricsLogGroupName"
+          HealthCheck:
+            Command: ["/healthcheck"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: otel
 
   # ---------------------------------------------------------------------
   # Load balancer
@@ -408,6 +602,162 @@ Resources:
         - ContainerName: !Ref ProjectName
           ContainerPort: 8000
           TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------------
+  # Alarms (~$0.10/month per metric they watch). They notify through the
+  # shared alarm topic in 01-observability.yaml (emails are set up there).
+  # ---------------------------------------------------------------------
+  # 5xx from the app itself (Target) or from the ALB (e.g. 502/503 when no
+  # healthy task is running), summed.
+  ServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-5xx-errors"
+      AlarmDescription: 5 or more server errors (5xx) in 5 minutes.
+      Metrics:
+        - Id: total
+          Label: 5xx responses (app + load balancer)
+          Expression: FILL(app5xx, 0) + FILL(alb5xx, 0)
+          ReturnData: true
+        - Id: app5xx
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_Target_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+        - Id: alb5xx
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_ELB_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 5
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+
+  # The app and the collector share the task's memory; sustained >80%
+  # means it's time to raise ContainerMemory before the task gets killed.
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-memory-high"
+      AlarmDescription: ECS task memory above 80% for 15 minutes.
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+
+  # Actionable alert: players can't start the game. Each failure is one
+  # page load whose game canvas couldn't start (the browser reports at
+  # most once per page load, so one player retrying counts once). One
+  # failure is usually one player's browser quirk; 3+ in 10 minutes means
+  # several real players can't play at all -- at this game's traffic, an
+  # outage. Watches only the version this stack is running (taken from the
+  # image tag, which build.sh also bakes in as service.version), so the
+  # alert names the release that's failing; every deploy/promote updates it.
+  CanvasCreationFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-canvas-creation-failures"
+      AlarmDescription: !Sub
+        - >-
+          Players can't start the game: 3+ page loads failed to create the
+          game canvas in 10 minutes.
+          service=snake-arena-backend environment=${DeploymentEnvironment}
+          version=${Version} owner=${AlertOwner}
+          dashboard=${DashboardUrl} (set Environment=${DeploymentEnvironment}).
+          Runbook: 1) Dashboard "Canvas creation failures" chart: which
+          reason, which version. 2) Began right after deploying this
+          version? Roll back: infra/aws/deploy.sh (dev) or redeploy the
+          previous tag (prod), then investigate frontend/src/game.js and
+          App.jsx. 3) Only no_2d_context, no recent deploy: likely a browser
+          or extension change; try several browsers. 4) Sudden burst: the
+          report endpoint is public; check X-Ray traces of POST
+          /api/client-errors for one ClientIp or a non-browser UserAgent
+          (possible false alarm).
+        - Version: !Select [1, !Split [":", !Ref ImageUri]]
+          DashboardUrl:
+            Fn::ImportValue: !Sub "${ObservabilityStackName}-DashboardUrl"
+      Metrics:
+        - Id: failures
+          Label: Canvas creation failures (all reasons)
+          Expression: FILL(nocontext, 0) + FILL(exception, 0)
+          ReturnData: true
+        - Id: nocontext
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: SnakeArena
+              MetricName: client.canvas_creation_failures
+              Dimensions:
+                - Name: deployment.environment.name
+                  Value: !Ref DeploymentEnvironment
+                - Name: service.version
+                  Value: !Select [1, !Split [":", !Ref ImageUri]]
+                - Name: reason
+                  Value: no_2d_context
+            Period: 600
+            Stat: Sum
+        - Id: exception
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: SnakeArena
+              MetricName: client.canvas_creation_failures
+              Dimensions:
+                - Name: deployment.environment.name
+                  Value: !Ref DeploymentEnvironment
+                - Name: service.version
+                  Value: !Select [1, !Split [":", !Ref ImageUri]]
+                - Name: reason
+                  Value: exception
+            Period: 600
+            Stat: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 3
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      Tags:
+        - Key: service
+          Value: snake-arena-backend
+        - Key: environment
+          Value: !Ref DeploymentEnvironment
+        - Key: version
+          Value: !Select [1, !Split [":", !Ref ImageUri]]
+        - Key: owner
+          Value: !Ref AlertOwner
 
 Outputs:
   AppUrl:

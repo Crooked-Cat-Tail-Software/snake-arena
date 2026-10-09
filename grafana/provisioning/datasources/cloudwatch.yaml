@@ -1,0 +1,12 @@
+# CloudWatch, read with the AWS credentials grafana/start.sh passes in
+# (short-lived ones from your `aws login` session -- nothing stored).
+apiVersion: 1
+datasources:
+  - name: CloudWatch
+    type: cloudwatch
+    uid: cloudwatch
+    isDefault: true
+    jsonData:
+      authType: default
+      # This project's assigned Region (see infra/aws/README.md).
+      defaultRegion: us-east-2

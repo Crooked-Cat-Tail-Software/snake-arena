@@ -1,85 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploys Snake Arena to AWS: ECR repository -> build & push the image ->
-# app stack (VPC, RDS Postgres, ECS Fargate, ALB). Run this yourself, from
-# your own machine, with the AWS CLI configured (aws configure) and
-# Docker running -- this script is not run by Claude. See README.md in
-# this directory for the full picture, a cost estimate, and how to tear
-# it back down when you're done (./teardown.sh).
+# Deploy stage: serves an image that build.sh (the build stage) already
+# pushed to ECR. Deploys/updates the app stack (VPC, RDS Postgres, ECS
+# Fargate, ALB) pointing at that image; ECS pulls it from ECR. Nothing is
+# built here and Docker isn't needed. See README.md in this directory for
+# the full picture, a cost estimate, and ./teardown.sh.
 #
-# Usage: ./deploy.sh [project-name] [aws-region] [db-deletion-protection]
-# Defaults: snake-arena, us-east-2, false
+# Usage: ./deploy.sh [project-name] [aws-region] [db-deletion-protection] [image-tag]
+# Defaults: snake-arena, us-east-2, false, the most recently pushed image
+#
+# Typical dev flow:
+#   ./build.sh                 # build + push, prints e.g. 20260818-163457-83242da
+#   ./deploy.sh                # deploy the newest image (or pass its tag as arg 4)
 #
 # Dev and production are two independent copies of the same stacks,
-# told apart only by project name:
-#   ./deploy.sh                                     # dev  (snake-arena-*)
-#   ./deploy.sh snake-arena-prod us-east-2 true     # prod, FIRST CREATION ONLY
-# After prod exists, update it only with ./promote.sh, which ships the
-# image dev is running instead of rebuilding. The third argument turns on
-# RDS deletion protection -- always pass "true" for prod. (Region defaults to us-east-2 because that's this
-# project's assigned Region under the new AWS experience account type --
-# see ~/.claude/CLAUDE.md's AWS Agent Toolkit rules if that applies to
-# you. Pass a different Region explicitly if yours differs.)
+# told apart only by project name. Prod is created once with
+#   ./build.sh snake-arena-prod && ./deploy.sh snake-arena-prod us-east-2 true
+# and after that only updated with ./promote.sh, which ships the image dev
+# is running. The third argument turns on RDS deletion protection --
+# always pass "true" for prod. (Region defaults to us-east-2 because
+# that's this project's assigned Region under the new AWS experience
+# account type. Pass a different Region explicitly if yours differs.)
 
 PROJECT_NAME="${1:-snake-arena}"
 AWS_REGION="${2:-us-east-2}"
 DB_DELETION_PROTECTION="${3:-false}"
+IMAGE_TAG="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-IMAGE_TAG="$(date +%Y%m%d%H%M%S)"
+# Reported on every trace as deployment.environment.name.
+case "$PROJECT_NAME" in
+  *-prod) DEPLOY_ENV=prod ;;
+  *) DEPLOY_ENV=dev ;;
+esac
 
-echo "== Snake Arena AWS deploy =="
-echo "Project: $PROJECT_NAME   Region: $AWS_REGION   Image tag: $IMAGE_TAG"
-echo "DB deletion protection: $DB_DELETION_PROTECTION"
+command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and sign in first."; exit 1; }
+
+echo "== Snake Arena deploy =="
+echo "Project: $PROJECT_NAME ($DEPLOY_ENV)   Region: $AWS_REGION   DB deletion protection: $DB_DELETION_PROTECTION"
 echo
 
-command -v aws >/dev/null 2>&1 || { echo "aws CLI not found -- install it and run 'aws configure' first."; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "docker not found -- install/start Docker first."; exit 1; }
+# The app stack imports the shared metrics log group and alarm topic.
+if ! aws cloudformation describe-stacks --stack-name snake-arena-observability \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "No snake-arena-observability stack -- run ./deploy-observability.sh $AWS_REGION first"
+  echo "(once; dev and prod share it)."
+  exit 1
+fi
 
-echo "--> [1/5] Deploying ECR repository stack..."
-aws cloudformation deploy \
-  --stack-name "${PROJECT_NAME}-ecr" \
-  --template-file "$SCRIPT_DIR/01-ecr.yaml" \
-  --parameter-overrides ProjectName="$PROJECT_NAME" \
-  --region "$AWS_REGION"
+echo "--> [1/3] Finding the image in ECR..."
+if ! REPO_URI=$(aws cloudformation describe-stacks \
+    --stack-name "${PROJECT_NAME}-ecr" \
+    --region "$AWS_REGION" \
+    --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" \
+    --output text 2>/dev/null); then
+  echo "No ${PROJECT_NAME}-ecr stack -- run ./build.sh $PROJECT_NAME $AWS_REGION first."
+  exit 1
+fi
+REPO_NAME="${REPO_URI#*/}"
 
-REPO_URI=$(aws cloudformation describe-stacks \
-  --stack-name "${PROJECT_NAME}-ecr" \
-  --region "$AWS_REGION" \
-  --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" \
-  --output text)
-echo "ECR repository: $REPO_URI"
+if [ -z "$IMAGE_TAG" ]; then
+  IMAGE_TAG=$(aws ecr describe-images \
+    --repository-name "$REPO_NAME" \
+    --region "$AWS_REGION" \
+    --query "sort_by(imageDetails[?imageTags != null], &imagePushedAt)[-1].imageTags[0]" \
+    --output text)
+  if [ -z "$IMAGE_TAG" ] || [ "$IMAGE_TAG" = "None" ]; then
+    echo "No images in $REPO_NAME -- run ./build.sh $PROJECT_NAME $AWS_REGION first."
+    exit 1
+  fi
+  echo "No tag given -- using the most recently pushed image."
+elif ! aws ecr describe-images \
+    --repository-name "$REPO_NAME" \
+    --region "$AWS_REGION" \
+    --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+  echo "Image tag $IMAGE_TAG isn't in $REPO_NAME -- build/push it first with ./build.sh."
+  exit 1
+fi
+IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+echo "Image: $IMAGE_URI"
 echo
 
-echo "--> [2/5] Building the image (this is the same Dockerfile 'docker compose build' uses)..."
-# Fargate runs x86_64 (see RuntimePlatform in 02-app.yaml). Without an
-# explicit platform, an Apple Silicon Mac builds an arm64 image that
-# Fargate can't start ("exec format error"), and the ECS service never
-# stabilizes.
-docker build --platform linux/amd64 -t "${PROJECT_NAME}:${IMAGE_TAG}" "$REPO_ROOT"
-docker tag "${PROJECT_NAME}:${IMAGE_TAG}" "${REPO_URI}:${IMAGE_TAG}"
-echo
-
-echo "--> [3/5] Pushing to ECR..."
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "${REPO_URI%%/*}"
-docker push "${REPO_URI}:${IMAGE_TAG}"
-echo
-
-echo "--> [4/5] Deploying the app stack (VPC, RDS, ECS, ALB)..."
-echo "    This step takes the longest -- RDS alone is typically 5-10 minutes."
-echo "    (First deploy only; updates after this are much faster.)"
+echo "--> [2/3] Deploying the app stack (VPC, RDS, ECS, ALB)..."
+echo "    First deploy takes the longest -- RDS alone is typically 5-10 minutes."
 aws cloudformation deploy \
   --stack-name "${PROJECT_NAME}-app" \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
-  --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="${REPO_URI}:${IMAGE_TAG}" \
-    DBDeletionProtection="$DB_DELETION_PROTECTION" \
+  --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="$IMAGE_URI" \
+    DBDeletionProtection="$DB_DELETION_PROTECTION" DeploymentEnvironment="$DEPLOY_ENV" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
   --region "$AWS_REGION"
 echo
 
-echo "--> [5/5] Done. App URL:"
+echo "--> [3/3] Done. App URL:"
 APP_URL=$(aws cloudformation describe-stacks \
   --stack-name "${PROJECT_NAME}-app" \
   --region "$AWS_REGION" \

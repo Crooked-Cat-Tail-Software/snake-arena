@@ -1,0 +1,11 @@
+# Loads every dashboard JSON in grafana/dashboards/. Edit the JSON files
+# (or edit in Grafana, then export and paste back) -- changes saved only in
+# the UI are lost when the container is recreated.
+apiVersion: 1
+providers:
+  - name: snake-arena
+    folder: Snake Arena
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

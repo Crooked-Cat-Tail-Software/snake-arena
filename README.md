@@ -31,6 +31,11 @@ backend → frontend → tests, with a human review checkpoint after each.
       tests run in parallel, then the Docker Compose integration/e2e
       suite; a manually-triggered job deploys to AWS via a GitHub OIDC
       role (no stored credentials) and validates it via `/api/health`
+      — **deploy jobs blocked** until advanced features are activated
+      in AWS Settings (see "CI/CD" below); deploy with the scripts
+- [x] OpenTelemetry tracing and game metrics in the backend — tagged
+      with service name, environment, and deployed version; on AWS sent
+      to X-Ray and CloudWatch, with alarms (see "Telemetry" below)
 
 ## Requirements
 
@@ -275,14 +280,86 @@ please run `uv run pytest ../tests/integration -v` yourself with Docker
 Desktop running to get the first real pass/fail signal on these four
 tests.
 
+## Telemetry (OpenTelemetry)
+
+The backend emits OpenTelemetry traces — one span per API request and
+per database query (`backend/app/telemetry.py`). `/api/health` is not
+traced, since the load balancer polls it every few seconds. It also
+emits five game metrics (`backend/app/game_metrics.py`):
+
+| Metric | What it counts |
+|---|---|
+| `scores.submitted` | accepted scores — roughly, games finished |
+| `scores.value` | distribution of accepted scores (average, min, max, percentiles) |
+| `scores.rejected` | rejected submissions, labelled `reason` = `player_name` / `score` / `malformed` |
+| `leaderboard.reads` | leaderboard requests |
+| `leaderboard.new_top_score` | scores that beat every earlier score (a tie doesn't count) |
+| `client.canvas_creation_failures` | page loads whose game canvas couldn't start, labelled `reason` = `no_2d_context` / `exception` — reported by the browser via `POST /api/client-errors`, at most once per page load |
+
+Never label a metric by player name: on CloudWatch every distinct label
+combination is a separately billed metric.
+
+### Grafana dashboard
+
+A local Grafana with a "Snake Arena — game metrics" dashboard reads these
+metrics from CloudWatch, filterable by **environment** and **deployed
+version** (one, several, or All). From the repo root, after `aws login`:
+```
+grafana/start.sh
+```
+Then open http://localhost:3000. It uses your `aws login` session and
+renews its credentials itself; when that session ends, run `aws login`
+again (no restart needed). Stop it with `docker compose --profile
+monitoring stop grafana`. The dashboard is `grafana/dashboards/
+snake-arena.json` — edit it in Grafana, then export the JSON and replace
+that file to keep the change (UI-only edits are lost when the container
+is recreated). Grafana only listens on this machine (127.0.0.1), and a
+plain `docker compose up` doesn't start it.
+
+All traces and metrics carry three resource attributes:
+
+| Attribute | Comes from | Values |
+|---|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` | `snake-arena-backend` (default) |
+| `deployment.environment.name` | `APP_ENVIRONMENT` | `local` (default, docker compose), `dev`, `prod` (set by `deploy.sh`/`promote.sh` via the `DeploymentEnvironment` CloudFormation parameter) |
+| `service.version` | `APP_VERSION` | the image tag, e.g. `20261008-163457-89a430d`, baked in by `infra/aws/build.sh`; `local` otherwise |
+
+Where spans go is set with the standard OTel environment variables:
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` — export over
+  OTLP/HTTP to any OpenTelemetry collector.
+- `OTEL_TRACES_EXPORTER=console` / `OTEL_METRICS_EXPORTER=console` —
+  print spans / metrics (every 60s) to stdout, for local debugging:
+  ```
+  OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console uv run uvicorn app.main:app --port 8000
+  ```
+- Neither set (the default locally) — spans are created but not sent
+  anywhere.
+
+On AWS, each environment's ECS task runs an ADOT collector sidecar that
+forwards traces to AWS X-Ray and metrics to CloudWatch (namespace
+`SnakeArena`). A separate, shared observability stack holds what dev and
+prod have in common — the metrics log group, the alarm-notification
+topic, a CloudWatch dashboard with environment and version dropdowns, and
+an X-Ray group per environment. See "Observability" in
+[infra/aws/README.md](infra/aws/README.md).
+
+### On-call agent
+
+`on-call-engineer/poll.py` polls the dev and prod alarms every minute and,
+when one fires, has a read-only Claude Code agent investigate it and
+write a diagnosis report. See
+[on-call-engineer/README.md](on-call-engineer/README.md).
+
 ## Deploy to AWS
 
 `infra/aws/` has CloudFormation templates and a deploy script that run
 the app on AWS: ECS Fargate for the container, managed RDS for Postgres,
 behind an Application Load Balancer. See
 [infra/aws/README.md](infra/aws/README.md) for the architecture, cost
-estimate, and how to run it (`./deploy.sh`) and tear it back down
-(`./teardown.sh`) — like the Docker commands above, these are meant to
+estimate, and how to build and deploy it and tear it back down. From the
+repo root that's `infra/aws/build.sh`, then `infra/aws/deploy.sh` (and
+`infra/aws/teardown.sh`); `./build.sh` alone only works after `cd
+infra/aws` — like the Docker commands above, these are meant to
 be run by you, not by Claude, since deploying needs your own AWS
 credentials.
 
@@ -297,3 +374,10 @@ CI/CD section](infra/aws/README.md#cicd-github-actions) for the one-time
 setup (deploying the OIDC role, adding its ARN as a GitHub Actions
 variable) — that part still needs to be run by you, for the same reason
 as the AWS deploy itself.
+
+> **The CI deploy jobs don't work on this AWS project yet.** The managed
+> service control policy blocks creating the GitHub OIDC provider, so the
+> deploy role stacks were never created (`snake-arena-github-oidc` rolled
+> back on 2026-09-24). Activating advanced features in AWS Settings lifts
+> that. Until then, deploy and promote by running the `infra/aws/` scripts
+> yourself; the CI test jobs are unaffected.

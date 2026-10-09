@@ -150,6 +150,7 @@ Resources:
                   - ecr:CompleteLayerUpload
                   - ecr:BatchGetImage
                   - ecr:DescribeRepositories
+                  - ecr:DescribeImages
                   - ecr:CreateRepository
                   - ecr:DeleteRepository
                   - ecr:PutLifecyclePolicy
@@ -202,11 +203,12 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-ecr/*"
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-app/*"
 
-              # --- IAM: 02-app.yaml creates exactly one role (the ECS
-              # execution role) and needs to pass it to the ECS service
-              # it also creates. Scoped to that one role's name only --
-              # this role cannot create, modify, or pass any other IAM
-              # role or user in the account. ---
+              # --- IAM: 02-app.yaml creates exactly two roles (the ECS
+              # execution role, and the task role the ADOT collector uses
+              # to write traces to X-Ray) and needs to pass them to the
+              # ECS task definition it also creates. Scoped to those two
+              # role names only -- this role cannot create, modify, or
+              # pass any other IAM role or user in the account. ---
               - Sid: ManageECSExecutionRole
                 Effect: Allow
                 Action:
@@ -223,14 +225,31 @@ Resources:
                   - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
-                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-execution-role"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-execution-role"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-task-role"
               - Sid: PassECSExecutionRole
                 Effect: Allow
                 Action: iam:PassRole
-                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-execution-role"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-execution-role"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-ecs-task-role"
                 Condition:
                   StringEquals:
                     iam:PassedToService: ecs-tasks.amazonaws.com
+
+              # --- Alarms 02-app.yaml creates, scoped to this project's
+              # names. (Their SNS topic lives in the shared observability
+              # stack, which is deployed by hand, not by CI.) ---
+              - Sid: ManageProjectAlarms
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                  - cloudwatch:ListTagsForResource
+                Resource: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-*"
 
               # --- Everything else 02-app.yaml creates: a VPC and its
               # networking, RDS, ECS, and the ALB. AWS does not support
@@ -327,6 +346,8 @@ Resources:
                   - logs:TagResource
                   - logs:ListTagsForResource
                   - secretsmanager:DescribeSecret
+                  # No resource-level scoping for these read-only calls.
+                  - cloudwatch:DescribeAlarms
                 Resource: "*"
 
 Outputs:

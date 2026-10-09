@@ -937,3 +937,504 @@ only.
 **Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean. The
 workflow can't run yet: GitHub OIDC is blocked by the project's SCP until
 advanced features are activated (see Stage 12).
+
+**Real end-to-end test of the promotion path (2026-10-07, after merging
+PR #3):** run locally with `promote.sh`, since the GitHub workflow can't
+authenticate to AWS yet.
+- Deployed dev with `./deploy.sh` -> healthy, running image tag
+  `20261007190140`. (Prod was on `20261007162817` beforehand.)
+- `./promote.sh` -> all 5 steps passed; prod healthy on the first check.
+- Verified independently, not just from the script's output: the prod
+  stack is `UPDATE_COMPLETE` with `ImageUri` `snake-arena-prod:20261007190140`;
+  the running ECS task uses that image; `/api/health`, `/` (HTTP 200) and
+  `/api/scores` (HTTP 200) all respond; RDS deletion protection still on.
+- Byte-for-byte check: prod's copy has a different top-level digest
+  (`a630fc…`) because `docker pull`/`push` wraps the image in a new OCI
+  index, but that index's amd64 manifest is dev's exact `929ed9…`, with
+  identical config and layer digests.
+- Tore dev back down with `./teardown.sh`; prod still healthy afterwards.
+
+**Hiccup worth knowing:** the first attempt hung ~30 minutes at the very
+start of `docker build` (resolving `docker/dockerfile:1`). Docker Hub was
+reachable and restarting Docker Desktop didn't help; the cause was Docker
+Desktop's `desktop` credential helper hanging while Docker Desktop waited
+on a dialog in its own window. Fixed by the human accepting that dialog.
+If a build sits on its first step for minutes, check Docker Desktop for a
+pending prompt.
+
+**Still untested:** only the GitHub Actions -> AWS OIDC sign-in, blocked
+until advanced features are activated in AWS Settings.
+
+## Stage 14 — Separate build and deploy stages; YYYYMMDD-HHMMSS-shortsha tags
+
+**Asked:** split the deploy into a Build stage (build the image, push it
+to ECR) and a Deploy stage (pull the image from the registry and serve
+it); the manual prod promotion keeps pulling dev's deployed image; tag
+every image `YYYYMMDD-HHMMSS-shortsha` (e.g. `20260818-163457-83242da`).
+
+**Generated/changed:**
+- `infra/aws/build.sh` (new, Build) — ensures the ECR stack exists,
+  builds `linux/amd64`, pushes `<repo>:<UTC YYYYMMDD-HHMMSS>-<7-char
+  sha>`, prints the tag and writes `image_tag` to `$GITHUB_OUTPUT` in
+  CI. Refuses to build with uncommitted changes to tracked files (the
+  tag's SHA would be wrong); `ALLOW_DIRTY=1` overrides.
+- `infra/aws/deploy.sh` (Deploy) — no longer builds or needs Docker:
+  checks the given tag exists in ECR (or picks the newest pushed image)
+  and deploys the app stack pointing at it; ECS pulls it. New 4th
+  argument `image-tag`; the existing three-argument calls still work.
+  Also makes rollback a matter of deploying an older tag.
+- `ci-cd.yaml` — the single `deploy` job became `build` (outputs
+  `image_tag`) → `deploy` (deploys exactly that tag, then health check).
+- `00-github-oidc.yaml` — deploy role gains `ecr:DescribeImages`, which
+  `deploy.sh` now calls.
+- `promote.sh` unchanged in behavior — it already copies dev's deployed
+  image under the same tag, so prod carries the same
+  `YYYYMMDD-HHMMSS-shortsha` tag. Comments updated.
+- Docs: `infra/aws/README.md` ("Build and deploy" section, CI, promotion,
+  prod creation), top-level `README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** UTC timestamps (so
+local and CI tags sort together); 7-character short SHA (matches the
+example); dirty-tree refusal.
+
+**Verified:** `cfn-lint`, `shellcheck`, `actionlint` all clean.
+
+## Stage 15 — OpenTelemetry instrumentation
+
+**Asked:** instrument the backend with OpenTelemetry, including service
+name, environment, and deployed version in the telemetry.
+
+**Generated/changed:**
+- `backend/app/telemetry.py` (new) — tracer provider whose resource
+  carries `service.name` (`OTEL_SERVICE_NAME`, default
+  `snake-arena-backend`), `deployment.environment.name` plus the legacy
+  `deployment.environment` (`APP_ENVIRONMENT`, default `local`), and
+  `service.version` (`APP_VERSION`, default `local`). Auto-instruments
+  FastAPI (excluding `/api/health`) and SQLAlchemy. Exports over
+  OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, to stdout with
+  `OTEL_TRACES_EXPORTER=console`, otherwise nowhere.
+- `backend/app/main.py` — calls `setup_telemetry(app, engine)`.
+- `backend/requirements.txt` — OTel SDK 1.45 / instrumentations 0.66b1
+  (released in lockstep; pinned as a matched pair).
+- `Dockerfile` — `ARG/ENV APP_VERSION`; `infra/aws/build.sh` passes the
+  image tag. Baked into the image so `promote.sh`, which ships dev's exact
+  image, carries the version to prod.
+- `infra/aws/02-app.yaml` — new `DeploymentEnvironment` parameter
+  (`dev`/`prod`) → `APP_ENVIRONMENT` on the container. `deploy.sh`
+  derives it from the project name (`-prod` suffix → `prod`);
+  `promote.sh` passes `prod` explicitly.
+- `docker-compose.yml` — `APP_ENVIRONMENT: local`.
+- `tests/test_telemetry.py` (new, 4 tests) — resource attributes from env
+  and defaults; a real request produces a server span with all three;
+  health checks produce no request span.
+- Docs: `README.md` ("Telemetry"), `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** traces only (no metrics
+or logs yet); health checks excluded; one service name for dev and prod,
+told apart by environment (the OTel convention); environment values
+`dev`/`prod` matching stack names; no telemetry backend chosen yet — on
+AWS spans are currently not exported anywhere.
+
+**Verified:** full fast suite 19/19 passing against real Postgres;
+`cfn-lint`, `shellcheck`, `docker compose config` clean; built the real
+image with `--build-arg APP_VERSION=20261008-000000-testsha`, ran it with
+`APP_ENVIRONMENT=dev` and the console exporter, and confirmed all 7 spans
+from one `GET /api/scores` (request, SQL, connect) carried all three
+attributes, with no span for the startup health-check polls.
+
+**Not verified:** a real AWS deploy with these changes (needs your
+credentials), and export to a real collector.
+
+## Stage 16 — Send traces to AWS X-Ray (ADOT collector sidecar)
+
+**Asked:** "yes" to Claude's suggestion to forward the Stage 15 traces to
+X-Ray via an ADOT collector sidecar on ECS.
+
+**Generated/changed:**
+- `infra/aws/02-app.yaml` — new `otel-collector` container
+  (`aws-otel-collector:v0.50.0`, pinned via the `CollectorImage`
+  parameter; latest release, checked against GitHub and public ECR):
+  OTLP/HTTP receiver on 127.0.0.1:4318, memory limiter + batch, `awsxray`
+  exporter with `deployment.environment.name` and `service.version`
+  indexed as annotations. Non-essential, 128 MB hard cap, restart policy,
+  `/healthcheck` health check, logs under the `otel/` prefix. App
+  container gets `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` and
+  depends on the collector having *started* (not being healthy).
+  New `TaskRole` (`<project>-ecs-task-role`): `xray:PutTraceSegments` and
+  `xray:PutTelemetryRecords` only; trust limited by `aws:SourceAccount` /
+  `aws:SourceArn`.
+- `infra/aws/00-github-oidc.yaml` — deploy role may manage/pass the new
+  task role (by exact name), alongside the execution role.
+- Docs: `infra/aws/README.md` (architecture, new "Tracing" section, cost,
+  deploy-role scope), `README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** kept the 512 MB task
+size rather than raising it to 1024 as first suggested — `aws
+cloudformation deploy` keeps an existing stack's previous parameter
+values, so a new default wouldn't reach the existing stacks, and the
+measurement below showed it isn't needed. No X-Ray centralized sampling
+(every request is traced; fine at this traffic, free tier covers it).
+
+**Verified:** `cfn-lint` clean on both templates. Ran the real
+`aws-otel-collector:v0.50.0` image locally with the exact config from the
+template and a 128 MB limit: config accepted, `/healthcheck` returned 200
+with the 127.0.0.1 binding. Ran the app image in the collector's network
+namespace (as in a Fargate task) and sent 200 requests: 1,002 spans
+reached the X-Ray exporter, whose only error was "get credentials" (no
+AWS credentials locally — on Fargate the task role supplies them).
+Collector used ~30 MB, app ~71 MB.
+
+**Not verified:** the real deploy and spans arriving in X-Ray; the
+account's plan check (`aws freetier get-account-plan-state`) — AWS
+sign-in had expired.
+
+**Correction (same day):** Claude's hand-off told the human to redeploy
+the two deploy-role stacks (`snake-arena-github-oidc`,
+`snake-arena-prod-github-oidc`) before the next CI deploy. That was
+wrong: neither stack has ever existed in a working state.
+`snake-arena-github-oidc` is in `ROLLBACK_COMPLETE` from 2026-09-24
+because the managed SCP denies `iam:CreateOpenIDConnectProvider` (already
+recorded in Stage 12 and `infra/aws/README.md` -- Claude missed it).
+Claude confirmed this from the stack's events. No action is needed until
+advanced features are activated; the `00-github-oidc.yaml` change stays,
+so the role is correct when that happens. Deploys continue locally via the
+scripts. Separately, `./build.sh` failed with "no such file" when run from
+the repo root -- the top-level README showed `./build.sh` without its
+`infra/aws/` path; fixed there. Docs updated: top-level `README.md` (CI
+block note, status, script paths), `infra/aws/README.md` (what to do once
+unblocked), `AGENTS.md`.
+
+## Stage 17 — Game metrics and alarms
+
+**Asked:** after Claude listed metric options, "implement that": five
+game metrics plus alarms on load-balancer 5xx errors and ECS memory.
+
+**Generated/changed:**
+- `backend/app/game_metrics.py` (new) — `scores.submitted`,
+  `scores.value` (histogram), `scores.rejected` (label `reason`:
+  `player_name` / `score` / `malformed`), `leaderboard.reads`,
+  `leaderboard.new_top_score` (strictly beats every earlier score; ties
+  don't count, matching the leaderboard's earlier-wins tie-break).
+  Attached to `app.state` so tests can swap in an in-memory reader.
+- `backend/app/telemetry.py` — meter provider with the same resource
+  attributes; OTLP or console export via `OTEL_METRICS_EXPORTER`;
+  delta temporality (CloudWatch's exporter drops the first cumulative
+  point per task); exponential histograms so CloudWatch can compute
+  percentiles.
+- `backend/app/main.py` — counts submissions, new #1s and leaderboard
+  reads; a `RequestValidationError` handler counts rejected `POST
+  /api/scores` and then delegates to FastAPI's default handler, so the
+  422 body `openapi.yaml` documents is unchanged (no contract change).
+  `crud.get_high_score` added.
+- `infra/aws/02-app.yaml` — collector metrics pipeline → `awsemf`
+  (namespace `SnakeArena`, `NoDimensionRollup`, `metric_declarations`
+  limiting publication to the five metrics with environment / environment
+  + reason dimensions); `/ecs/<project>/metrics` log group (7 days); task
+  role may write only to it; `ServerErrorsAlarm` (target + ELB 5xx ≥ 5 in
+  5 min) and `MemoryHighAlarm` (> 80% for 15 min); optional `AlarmEmail`
+  parameter → SNS topic + email subscription.
+- `infra/aws/deploy.sh` — optional `ALARM_EMAIL` env var.
+- `infra/aws/00-github-oidc.yaml` — deploy role may manage
+  `<project>-*` alarms and SNS topics (still blocked until advanced
+  features are activated, kept accurate for then).
+- `tests/test_game_metrics.py` (new, 8 tests). Docs: `README.md`,
+  `infra/aws/README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** alarm thresholds (5
+errors / 5 min; 80% memory / 15 min); emails opt-in; 7-day retention for
+raw metric logs.
+
+**Caught during verification:** the first version's `scores.value`
+reached CloudWatch as min/max/sum/count only — no median, which Claude had
+promised. Switched to exponential histograms and re-verified.
+
+**Verified:** 27/27 tests pass (16 consecutive clean runs). One earlier
+run had a single failure, right after Claude removed test containers that
+had been using the same `snake_arena_test` database; it was not captured
+and has not recurred. `cfn-lint` and `shellcheck` clean. Ran the real
+`aws-otel-collector:v0.50.0` with the template's exact config, changed
+only to print CloudWatch records to stdout, and sent real traffic to the
+app image: namespace `SnakeArena`; only `deployment.environment.name`
+(and `reason`) as dimensions; values exactly as expected (3 submitted, 2
+new #1s, 1 read, 1 rejection per reason, a bad `?limit=` not counted);
+`scores.value` arrived as Values/Counts.
+
+**Not verified:** a real deploy — metrics arriving in CloudWatch, the
+task role's log permissions being sufficient, alarms evaluating, and the
+SNS email flow.
+
+## Stage 18 — Grafana dashboard, filterable by environment and version
+
+**Asked:** add a Grafana panel with the game metrics, filterable by
+environment and deployed version.
+
+**Found first:** Amazon Managed Grafana is denied on this AWS project by
+the managed SCP (`grafana:ListWorkspaces` explicit deny) — it would need
+advanced features. The human chose **local Grafana** over Grafana Cloud
+or a JSON file only. Also: metrics had only the environment dimension, so
+version filtering needed a collector change.
+
+**Generated/changed:**
+- `infra/aws/02-app.yaml` — `awsemf` dimension sets are now environment +
+  `service.version` (+ `reason`). Not both sets: that would double the
+  metric cost for no new information; Grafana sums across versions.
+- `docker-compose.yml` — `grafana` service (`grafana/grafana:13.2.2`;
+  13.2.3 was <2 weeks old), in a `monitoring` profile so plain `up` and
+  the integration tests are unaffected; port bound to 127.0.0.1;
+  anonymous Editor access; mounts only `~/.aws/config` (read-only) and
+  `~/.aws/login` (the `aws login` session) — not `~/.aws/credentials`.
+- `grafana/start.sh` — checks for a valid session, starts the service.
+- `grafana/provisioning/` — CloudWatch data source (`us-east-2`) and the
+  dashboard provider. `grafana/dashboards/snake-arena.json` — variables
+  `env` (single) and `version` (multi, All = `*`), 4 stat panels (totals
+  summed across the selected versions) and 4 time series (games by
+  version; median/p90/max score; rejections by reason; leaderboard
+  activity).
+- Docs: `README.md` ("Grafana dashboard"), `infra/aws/README.md`,
+  `AGENTS.md`.
+
+**Approach changed during the work:** Claude first passed credentials
+exported with `aws configure export-credentials` as environment variables.
+They expire after ~15 minutes (the `aws login` credential lifetime), so
+the dashboard would have needed a restart every 15 minutes. Tested
+instead whether Grafana's AWS SDK supports `login_session` profiles: with
+`~/.aws/config` + `~/.aws/login` mounted, the data source health check
+passes; with nothing mounted it fails ("failed to get shared config
+profile"), so the pass is real. (Grafana reads `.aws` from
+`/usr/share/grafana`, not `$HOME`.) Renewal confirmed: at 01:54 UTC,
+with no AWS CLI calls since ~01:37 (so nothing else could have refreshed
+the shared session files past the ~15-minute credential lifetime),
+Grafana still queried CloudWatch successfully.
+
+**Bug caught in verification:** the variable queries had an empty metric
+name, which CloudWatch `ListMetrics` rejects (`InvalidParameterValue`) —
+fixed by using `leaderboard.reads`.
+
+**Verified (with the human's permission to update dev):** deployed dev
+with the same image (`20261009-012240-a77d729`); made read-only
+leaderboard requests and two invalid score submissions (422, nothing
+saved; dev leaderboard confirmed empty). In a real browser: Environment
+lists `dev`; Version lists the running tag; with Version = All and with
+the single tag selected, Leaderboard reads showed 9 (12 sent; the newest
+minute not yet exported) and the series are labelled by version. A
+minute later: 13 reads (the 12 plus one leaderboard check) and 2
+rejections split `player_name` / `score` — every count exact. The 401s in
+the browser console are only `/api/user/stars` (anonymous users can't
+star dashboards). Fixed after seeing it: chart y-axes auto-scaled from
+~1, visually exaggerating differences; pinned to 0.
+
+**Not verified:** the games/score panels (needs real games — no fake
+scores were written to dev); prod (not redeployed).
+
+## Stage 19 — Separate, shared observability stack for dev and prod
+
+**Asked:** deploy the observability stack, separate from the application
+stack, and connect both dev and prod to it. The human chose a
+CloudWatch-native stack (over Grafana hosted on AWS at ~$30-35/month, or a
+central collector needing cross-VPC networking).
+
+**Generated/changed:**
+- `infra/aws/01-observability.yaml` (new, stack
+  `snake-arena-observability`): metrics log group `/snake-arena/metrics`
+  (7 days, one stream per environment), SNS topic `snake-arena-alarms`
+  with optional `AlarmEmail`, CloudWatch dashboard `snake-arena`
+  (Environment / Version pattern variables over SEARCH expressions, 4
+  totals, 4 charts, a selected-version row, both environments' alarms),
+  X-Ray groups per environment. Exports the log group and topic.
+- `infra/aws/02-app.yaml` — imports those instead of owning a metrics log
+  group, SNS topic and `AlarmEmail`; collector writes to the shared group
+  (stream = project name); alarms notify the shared topic. New
+  `ObservabilityStackName` parameter. Dependency direction deliberately
+  app → observability, so dev can still be torn down freely.
+- `infra/aws/deploy-observability.sh` (new); `deploy.sh` / `promote.sh`
+  refuse to run without the shared stack; `deploy.sh` loses
+  `ALARM_EMAIL` (moved to the shared stack). `00-github-oidc.yaml` loses
+  its SNS permissions (app stacks no longer create topics).
+- `backend/app/telemetry.py` — `ResourceAttributesOnSpans` copies
+  environment and version onto every span; test extended.
+- Docs: `infra/aws/README.md` ("Observability" rewritten, deploy order,
+  teardown, cost), `README.md`, `AGENTS.md`.
+
+**Found and fixed along the way:**
+- The Stage 16 claim that traces were filterable by environment/version
+  in X-Ray was wrong: 856 recent traces had **no** annotations. The
+  collector's `indexed_attributes` only indexes span attributes, and
+  environment/version are resource attributes (they arrived as
+  `otel.resource.*` metadata). README instructions to filter by
+  annotation were therefore wrong until this fix.
+- First fix attempt — a `transform` processor in the collector — was
+  tested locally first: this ADOT build doesn't include it and the
+  collector exits at startup. Deployed, that would have stopped all
+  telemetry in both environments. Moved the copy into the app instead.
+
+**Verified so far:** both templates `cfn-lint` clean, scripts
+`shellcheck` clean, 27/27 tests. Every dashboard SEARCH expression run
+through `GetMetricData` against real dev data with the placeholders
+filled in: all valid; counts match earlier traffic (13 reads, 2
+rejections split by reason). Deployed the shared stack, then dev (same
+image): dev alarms now point at `snake-arena-alarms`, dev metrics write
+to stream `snake-arena` in `/snake-arena/metrics`, old per-app metrics
+log group removed.
+
+**Then (human approved: commit, build dev, promote prod):** committed
+(`098a389`), built `20261009-022941-098a389`, deployed dev: 64 dev traces
+matched `annotation.deployment_environment_name = "dev" AND
+annotation.service_version = "20261009-022941-098a389"` — the annotation
+fix works. Promoted to prod with `promote.sh` (same image digest as dev;
+healthy on the first check). Prod: alarms → `snake-arena-alarms`; 52
+traces matched the prod group's filter; metrics stream `snake-arena-prod`
+in the shared log group; the dashboard's prod expression returned 6
+leaderboard reads (5 sent + 1 count check). Prod's RDS instance was not
+touched (created 2026-10-07, no RDS stack events today, deletion
+protection still on); its leaderboard was already empty. Only read-only
+requests were sent to prod.
+
+**Not verified:** the dashboard's dropdowns in the console (the browser
+pane isn't signed in to AWS, and Claude doesn't enter sign-in
+credentials); alarm emails (none configured).
+
+## Stage 20 — Actionable alert for repeated canvas-creation failures
+
+**Asked:** an actionable alert for repeated canvas component-creation
+failures, with a threshold and duration that represent real user impact,
+including service, environment, deployed version, owner and dashboard URL.
+
+**Found first:** the only canvas component is the game board
+(`new SnakeGame(canvas)` in `App.jsx`). `getContext("2d")` can return
+`null`; nothing checked it or caught errors, so players got a blank board
+and the backend never heard about it — no signal existed to alert on.
+The human chose the owner (`dbrown77`) and alert email
+(donna.brown05@gmail.com, kept out of the repo — passed as `ALARM_EMAIL`).
+
+**Generated/changed (contract first):**
+- `openapi.yaml`, `product-spec.md` (§5.5, §7): `POST /api/client-errors`
+  `{kind: canvas_creation, reason: no_2d_context | exception}` → 204;
+  closed enums, no extra fields, nothing stored.
+- Frontend: `game.js` throws `CanvasUnavailableError` when there's no 2D
+  context; `App.jsx` catches create/start failures, shows a message with
+  a Back button instead of a blank board, and reports once per page load;
+  `api.js` `reportClientError` is fire-and-forget (never throws).
+- Backend: `ClientErrorReport` schema, endpoint, metric
+  `client.canvas_creation_failures` (label `reason`).
+- `02-app.yaml`: collector publishes it with environment + version +
+  reason; `CanvasCreationFailuresAlarm` — ≥ 3 in one 10-minute period for
+  this environment and the running version (from `ImageUri`), notifies
+  the shared topic; description (821 chars rendered, limit 1,024) with
+  service, environment, version, owner, dashboard URL and a 4-step
+  runbook; same fields as tags. New `AlertOwner` parameter.
+- `01-observability.yaml`: exports `DashboardUrl`; dashboard gains a
+  canvas-failures chart and both environments' new alarms. Grafana
+  dashboard gains the same chart.
+- Tests: 6 backend (204 + counted by reason; invalid kind/reason/missing/
+  extra field → 422, not counted, not a rejected score) and 2 browser
+  tests (no 2D context → message, exactly one report across a retry;
+  throwing getContext → reason `exception`).
+
+**Threshold reasoning:** one report is usually one player's browser or
+extension; reports are deduplicated per page load, so 3 in 10 minutes
+means several separate page loads — real players — couldn't play. At
+this game's traffic that's an outage. Known risk, in the runbook: the
+endpoint is public, so fake reports can cause a false alarm (but not
+cost or data pollution — closed enums).
+
+**Verified so far:** 35/35 tests; `cfn-lint` clean; the real collector
+(stdout mode) published the metric with exactly the alarm's dimensions
+and correct counts.
+
+**Then (human approved: deploy, test-fire dev, then prod):** committed
+`6c375e2`; updated the shared stack with the alert email (subscription
+confirmed by the human); built and deployed
+`20261009-030525-6c375e2` to dev. Alarm description and tags verified via
+the API (all five fields present). Test fire: 3 reports to dev at
+03:14:20 UTC → alarm in ALARM at ~03:15:40, SNS notification sent
+03:15:36; back to OK at 03:25:49 with an OK notification. Promoted to
+prod (healthy; prod alarm reads environment=prod and the same version;
+RDS untouched). Prod alarm not test-fired.
+
+**Confirmed by the human:** both the ALARM and the OK notification
+emails arrived — the full path (browser report → metric → alarm → email
+→ reset) works end to end.
+
+## Stage 21 — On-call poller that hands firing alarms to an agent
+
+**Asked:** an `on-call-engineer/` directory with a script that polls the
+alert API every minute and passes alert details to a headless coding
+agent when an alert fires.
+
+**Decisions by the human (after Claude flagged the risk: an unattended
+agent running with the human's AWS session, triggerable by anyone who
+trips the public canvas alarm):** the agent **investigates and reports
+only** (not draft fixes or roll back); the poller runs as a **foreground
+script** (not a launchd service).
+
+**Generated:**
+- `on-call-engineer/poll.py` (stdlib only): every 60s, `describe-alarms
+  --alarm-name-prefix snake-arena- --state-value ALARM` (+ tags); one
+  investigation per firing (keyed by alarm name + state-change time,
+  persisted in git-ignored `.state.json`); one agent at a time (worker
+  thread); ≤ 4 runs/hour, over-cap firings logged but marked handled;
+  clear "run 'aws login'" message on expired sessions.
+- Agent: `claude -p --restricted --strict-mcp-config --tools
+  Read,Grep,Glob,Bash --allowedTools <git log/show/diff + read-only
+  CloudWatch/Logs/X-Ray/ECS/CloudFormation> --permission-mode dontAsk
+  --permission-prompts none --max-budget-usd 2 --no-session-persistence`.
+  `--restricted` chosen after reading `claude --help`: it ignores
+  user/project/local settings, so nothing allowed there widens the agent.
+  Prompt includes the alarm details and runbook, and tells it telemetry is
+  untrusted data. Output saved to git-ignored `reports/`.
+- `on-call-engineer/README.md`, `.gitignore`; `tests/test_on_call_poller.py`
+  (9 tests); docs in `README.md`, `AGENTS.md`.
+
+**Bugs caught by the tests before running for real:** the expired-session
+handler called `.splitlines()` on the exception object (would have
+crashed exactly when the session expired); state-file path bound at
+import time (tests would have written the real state file); report log
+line crashed for reports outside the repo.
+
+**Verified:** 44/44 tests. Launched the agent with the exact flags and a
+permissions-test prompt: the allowed `aws cloudwatch describe-alarms`
+**succeeded**; `aws sts get-caller-identity` and `touch` were **denied**
+("don't ask mode"); it had no write tool; no files were created. One real
+`--once --dry-run` poll read all six alarms (all OK) and launched nothing.
+
+**Live end-to-end test (human approved):** ran the poller, sent 3 fake
+canvas reports to dev at 03:53:27 UTC. Alarm fired 03:54:36; the poller
+picked it up at 03:55:30 and the agent wrote its report by 03:56:50. The
+report diagnosed a **likely false alarm** with high confidence (all 3
+reports from `curl/8.7.1` within 310 ms, same reason mix as the earlier
+test fire, no browser traffic, no deploy in between), recommended **not**
+rolling back, and found a real gap: the runbook's "single client IP"
+check can't work, because traces and logs record only the load
+balancer's internal 10.0.x.x addresses, not `X-Forwarded-For`. Not fixed
+here — flagged to the human.
+
+## Stage 22 — Record real client IPs (X-Forwarded-For)
+
+**Asked:** fix the gap the on-call agent found in Stage 21: the canvas
+runbook's "single client IP" check couldn't work, because logs and X-Ray
+recorded only the load balancer's internal 10.0.x.x addresses.
+
+**Found:** uvicorn 0.52.4 already honors `X-Forwarded-For`, but trusts it
+only from `127.0.0.1` by default (`FORWARDED_ALLOW_IPS`); the ALB connects
+from inside the VPC. uvicorn walks the header right to left and takes the
+first untrusted address — the one the ALB appends — so trusting the VPC
+doesn't let clients spoof their IP. The ECS security group already admits
+port 8000 only from the ALB.
+
+**Changed:** `02-app.yaml` sets `FORWARDED_ALLOW_IPS` to `!Ref VpcCidr`
+(no code change; local/Compose unchanged — header stays untrusted there);
+runbook step 4 now names X-Ray's `ClientIp` and `UserAgent`. Description
+842 chars rendered. Docs: `infra/aws/README.md`.
+
+**Verified locally with a real uvicorn (console exporter):** trusted proxy
++ `X-Forwarded-For: 203.0.113.9` → access log and span `net.peer.ip` =
+203.0.113.9; spoof attempt `6.6.6.6, 198.51.100.7` → 198.51.100.7 (fake
+ignored); untrusted sender with `X-Forwarded-For: 6.6.6.6` → 127.0.0.1
+(header ignored). `cfn-lint` clean.
+
+**Deployed (human approved: commit, dev, verify, prod):** committed
+`8c092ef`; redeployed dev and promoted prod (same image,
+`20261009-030525-6c375e2`). On both, a read-only request sent with a fake
+`X-Forwarded-For: 6.6.6.6` was recorded in X-Ray's `ClientIp` (and dev's
+access log) as the requester's real public IP. Prod's RDS untouched.
+

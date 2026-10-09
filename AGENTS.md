@@ -28,8 +28,9 @@ snake-arena/
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
 │   └── integration/          # pytest — runs real `docker compose build`/`up`
 ├── pytest.ini                # registers the `integration` marker
+├── on-call-engineer/          # poll.py: alarm poller -> read-only agent reports
 ├── infra/
-│   └── aws/                  # CloudFormation + deploy/promote/teardown scripts
+│   └── aws/                  # CloudFormation + build/deploy/promote/teardown scripts
 ├── .github/
 │   └── workflows/
 │       ├── ci-cd.yaml         # tests in CI; manually-triggered dev deploy job
@@ -152,6 +153,47 @@ database you care about; see `README.md`'s "Run the Docker integration
 tests" section for the full requirements and what each of the four tests
 checks.
 
+## Telemetry
+
+The backend is instrumented with OpenTelemetry (`backend/app/telemetry.py`,
+set up from `main.py`); see README.md's "Telemetry" section. When adding
+deploy paths, keep the three resource attributes flowing: `APP_VERSION`
+is baked into the image by `infra/aws/build.sh` (so promoted images keep
+their version); `APP_ENVIRONMENT` is set per deployment, never baked in.
+The OTel SDK (1.x) and contrib instrumentations (0.x betas) in
+`backend/requirements.txt` must be upgraded as a matched pair. On AWS,
+traces go app → ADOT collector sidecar (`02-app.yaml`, bound to
+127.0.0.1) → X-Ray, and game metrics (`backend/app/game_metrics.py`) →
+the same collector → CloudWatch (`SnakeArena`). Metric labels must stay
+low-cardinality (never player names); a new metric or label also needs
+a matching `metric_declarations` entry in the collector config, or it is
+silently not published. Metrics are published with dimensions
+environment + `service.version` (+ `reason`); the local Grafana dashboard
+(`grafana/`, `docker compose --profile monitoring`) sums across versions,
+so keep those dimension sets in step with its queries (and with the
+CloudWatch dashboard's SEARCH expressions in
+`infra/aws/01-observability.yaml`). That shared stack
+(`snake-arena-observability`) owns the metrics log group, alarm topic,
+dashboard and X-Ray groups; app stacks only import from it -- never make
+it import from an app stack, or dev could no longer be torn down. The
+frontend reports canvas start failures to `POST /api/client-errors`
+(closed enums only, once per page load); the alarm on them watches the
+running version (taken from `ImageUri`'s tag) -- keep its description
+under CloudWatch's 1,024-character limit. The
+ADOT collector image has no `transform` processor (it fails to start
+with one); per-span attribute changes go in the app
+(`telemetry.py`'s `ResourceAttributesOnSpans`). The on-call agent (`on-call-engineer/poll.py`)
+must stay read-only: never add Edit/Write tools or mutating commands
+(deploy, put-/create-/delete-/update-, git push/commit) to its allowlist --
+it runs unattended and can be triggered by anyone who trips the public
+canvas alarm. `tests/test_on_call_poller.py` enforces this. Any new IAM role in `02-app.yaml` must also be added
+to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
+CI deploys will fail with AccessDenied once they work. (They don't yet:
+the deploy role stacks can't be created on this AWS project until
+advanced features are activated -- see the "Blocked" note in
+`infra/aws/README.md`'s CI/CD section. Deploys are run locally with the
+`infra/aws/` scripts.)
+
 ## Conventions
 
 - Python: type hints on public functions, formatted with `black`, linted
@@ -270,6 +312,9 @@ checks.
       OIDC thumbprint was looked up fresh via web search against AWS's
       own security blog rather than recalled (a first, wrong recollection
       was caught this way before it reached the template). Human review
-      pending — push this to GitHub, do the one-time OIDC role setup in
+      pending — **update: the OIDC role stack can't be created on this
+      AWS project until advanced features are activated (managed SCP
+      denies `iam:*Provider*`), so CI deploys have never run; deploys
+      are done locally with the scripts.** Push this to GitHub, do the one-time OIDC role setup in
       `infra/aws/README.md`'s CI/CD section, and treat the first "Run
       workflow" click as the real test.

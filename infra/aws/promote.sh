@@ -7,10 +7,10 @@ set -euo pipefail
 # ever receives an image that has already run in dev -- "build once,
 # promote" -- so what you tested is byte-for-byte what ships.
 #
-# Dev must be deployed and healthy (./deploy.sh): teardown.sh deletes
+# Dev must be deployed and healthy (./build.sh && ./deploy.sh): teardown.sh deletes
 # dev's ECR repository, so there's nothing to promote while dev is down.
 # Prod must already exist -- create it once with
-#   ./deploy.sh snake-arena-prod us-east-2 true
+#   ./build.sh snake-arena-prod && ./deploy.sh snake-arena-prod us-east-2 true
 # and use this script for every prod update after that.
 #
 # Used by .github/workflows/promote.yaml; also runnable by hand.
@@ -39,9 +39,16 @@ stack_parameter() {
 echo "== Snake Arena promotion: $SOURCE_PROJECT -> $TARGET_PROJECT ($AWS_REGION) =="
 echo
 
+# The app stack imports the shared metrics log group and alarm topic.
+if ! aws cloudformation describe-stacks --stack-name snake-arena-observability \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "No snake-arena-observability stack -- run ./deploy-observability.sh $AWS_REGION first."
+  exit 1
+fi
+
 echo "--> [1/5] Finding the image dev is running..."
 if ! SOURCE_IMAGE=$(stack_parameter "${SOURCE_PROJECT}-app" ImageUri 2>/dev/null) || [ -z "$SOURCE_IMAGE" ] || [ "$SOURCE_IMAGE" = "None" ]; then
-  echo "No ${SOURCE_PROJECT}-app stack found -- deploy dev first (./deploy.sh) and test it."
+  echo "No ${SOURCE_PROJECT}-app stack found -- build and deploy dev first (./build.sh && ./deploy.sh) and test it."
   exit 1
 fi
 IMAGE_TAG="${SOURCE_IMAGE##*:}"
@@ -72,12 +79,13 @@ docker push "$TARGET_IMAGE"
 echo
 
 echo "--> [4/5] Updating the prod app stack to run $IMAGE_TAG..."
-# DBDeletionProtection stays "true" -- this script only ever targets prod.
+# DBDeletionProtection stays "true" and DeploymentEnvironment is "prod" --
+# this script only ever targets prod.
 aws cloudformation deploy \
   --stack-name "${TARGET_PROJECT}-app" \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$TARGET_PROJECT" ImageUri="$TARGET_IMAGE" \
-    DBDeletionProtection=true \
+    DBDeletionProtection=true DeploymentEnvironment=prod \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$AWS_REGION"

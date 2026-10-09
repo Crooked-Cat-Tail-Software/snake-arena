@@ -182,15 +182,17 @@ jobs:
         working-directory: backend
         run: uv run pytest ../tests/integration -v
 
-  # --- "deploys to AWS using a GitHub OIDC role" + "validates that the
-  # deploy is successful by checking the health endpoint" -- only runs
-  # on a manual "Run workflow" click (see the `on:` block's
-  # workflow_dispatch and this job's `if:`), never on a plain push. ---
-  # Dev deliberately does NOT use a GitHub Environment: that would
-  # change the OIDC token's `sub` claim and break the existing dev
-  # deploy role's branch-based trust policy.
-  deploy:
-    name: Deploy to AWS (dev)
+  # --- Build and deploy are separate stages, both only on a manual "Run
+  # workflow" click (see the `on:` block's workflow_dispatch and the
+  # `if:`s), never on a plain push. Build pushes an image to ECR tagged
+  # YYYYMMDD-HHMMSS-shortsha; deploy serves exactly that tag (ECS pulls
+  # it from ECR) and checks /api/health. Prod never builds -- it gets
+  # dev's image via promote.yaml.
+  # Neither job uses a GitHub Environment: that would change the OIDC
+  # token's `sub` claim and break the dev deploy role's branch-based
+  # trust policy. ---
+  build:
+    name: Build image (dev)
     runs-on: ubuntu-latest
     needs: [docker-compose-integration-tests]
     if: github.event_name == 'workflow_dispatch'
@@ -200,6 +202,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -209,10 +213,39 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy ECR + app stacks
+      - name: Build and push to ECR
+        id: build
+        # build.sh writes image_tag=<YYYYMMDD-HHMMSS-shortsha> to
+        # $GITHUB_OUTPUT.
+        run: |
+          chmod +x infra/aws/build.sh
+          infra/aws/build.sh "$PROJECT_NAME" "$AWS_REGION"
+
+  deploy:
+    name: Deploy to AWS (dev)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy the built image
+        # No Docker build here -- deploy.sh points the app stack at the
+        # image the build job pushed, and ECS pulls it from ECR.
         run: |
           chmod +x infra/aws/deploy.sh
-          infra/aws/deploy.sh "$PROJECT_NAME" "$AWS_REGION"
+          infra/aws/deploy.sh "$PROJECT_NAME" "$AWS_REGION" false "$IMAGE_TAG"
 
       - name: Get the app URL
         id: app_url
@@ -223,7 +256,7 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" \
             --output text)
           echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "Deployed: $url"
+          echo "Deployed $IMAGE_TAG: $url"
 
       - name: Validate deploy via the health endpoint
         # The ALB's target group can take a minute or two after the
