@@ -81,6 +81,15 @@ Parameters:
       forwards the app's traces to AWS X-Ray. Pinned to a release; must be
       v0.34.0 or newer (older versions silently drop W3C-format trace IDs).
 
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. Email address that gets notified when an alarm fires (AWS
+      sends a confirmation email first -- click the link in it). Blank =
+      alarms still change state in the CloudWatch console, but notify no
+      one. deploy.sh sets this from the ALARM_EMAIL environment variable.
+
   DBDeletionProtection:
     Type: String
     Default: "false"
@@ -102,6 +111,9 @@ Parameters:
   PublicSubnet2Cidr:
     Type: String
     Default: 10.0.1.0/24
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
 
 Resources:
   # ---------------------------------------------------------------------
@@ -297,6 +309,16 @@ Resources:
       LogGroupName: !Sub "/ecs/${ProjectName}"
       RetentionInDays: 14
 
+  # Raw records the collector writes in CloudWatch's Embedded Metric
+  # Format; CloudWatch extracts the SnakeArena metrics from them. Created
+  # here (rather than letting the collector create it) so it expires --
+  # the metrics themselves are kept by CloudWatch independently.
+  MetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/metrics"
+      RetentionInDays: 7
+
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -323,7 +345,7 @@ Resources:
 
   # Role the running containers use (unlike ExecutionRole, which ECS
   # itself uses to start them). Only the ADOT collector needs AWS access:
-  # writing traces to X-Ray.
+  # writing traces to X-Ray and metrics to its one log group.
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -353,6 +375,16 @@ Resources:
                   - xray:PutTelemetryRecords
                 # X-Ray's write actions don't support resource-level scoping.
                 Resource: "*"
+        - PolicyName: WriteMetricsToCloudWatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: !GetAtt MetricsLogGroup.Arn
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -447,6 +479,29 @@ Resources:
                     indexed_attributes:
                       - deployment.environment.name
                       - service.version
+                  # Game metrics -> CloudWatch, namespace SnakeArena. Only
+                  # the declarations below are published, each with only
+                  # the listed dimensions (every dimension combination is a
+                  # separately billed metric; rollups and per-task IDs
+                  # would multiply that).
+                  awsemf:
+                    region: ${AWS::Region}
+                    namespace: SnakeArena
+                    log_group_name: /ecs/${ProjectName}/metrics
+                    log_stream_name: app-metrics
+                    dimension_rollup_option: NoDimensionRollup
+                    resource_to_telemetry_conversion:
+                      enabled: true
+                    metric_declarations:
+                      - dimensions: [[deployment.environment.name]]
+                        metric_name_selectors:
+                          - "^scores[.]submitted$"
+                          - "^scores[.]value$"
+                          - "^leaderboard[.]reads$"
+                          - "^leaderboard[.]new_top_score$"
+                      - dimensions: [[deployment.environment.name, reason]]
+                        metric_name_selectors:
+                          - "^scores[.]rejected$"
                 service:
                   extensions: [health_check]
                   pipelines:
@@ -454,6 +509,10 @@ Resources:
                       receivers: [otlp]
                       processors: [memory_limiter, batch]
                       exporters: [awsxray]
+                    metrics:
+                      receivers: [otlp]
+                      processors: [memory_limiter, batch]
+                      exporters: [awsemf]
           HealthCheck:
             Command: ["/healthcheck"]
             Interval: 30
@@ -528,6 +587,88 @@ Resources:
         - ContainerName: !Ref ProjectName
           ContainerPort: 8000
           TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------------
+  # Alarms (~$0.10/month per metric they watch). Without AlarmEmail they
+  # only change state in the CloudWatch console.
+  # ---------------------------------------------------------------------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub "${ProjectName}-alarms"
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # 5xx from the app itself (Target) or from the ALB (e.g. 502/503 when no
+  # healthy task is running), summed.
+  ServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-5xx-errors"
+      AlarmDescription: 5 or more server errors (5xx) in 5 minutes.
+      Metrics:
+        - Id: total
+          Label: 5xx responses (app + load balancer)
+          Expression: FILL(app5xx, 0) + FILL(alb5xx, 0)
+          ReturnData: true
+        - Id: app5xx
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_Target_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+        - Id: alb5xx
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_ELB_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 5
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  # The app and the collector share the task's memory; sustained >80%
+  # means it's time to raise ContainerMemory before the task gets killed.
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-memory-high"
+      AlarmDescription: ECS task memory above 80% for 15 minutes.
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
 Outputs:
   AppUrl:

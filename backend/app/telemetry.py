@@ -1,7 +1,7 @@
-"""OpenTelemetry tracing for the Snake Arena backend.
+"""OpenTelemetry traces and metrics for the Snake Arena backend.
 
-Every span carries three resource attributes identifying where it came
-from, read from environment variables:
+Every span and metric carries three resource attributes identifying
+where it came from, read from environment variables:
 
   - service.name                -- OTEL_SERVICE_NAME (default
                                    "snake-arena-backend")
@@ -17,20 +17,30 @@ The legacy `deployment.environment` key is set too, alongside the
 current `deployment.environment.name` semantic convention, since some
 backends (e.g. AWS X-Ray / Application Signals) still read the old one.
 
-Where spans go is controlled by the standard OTel env vars, so nothing
-here is tied to one backend:
-  - OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
-    set -> spans are exported over OTLP/HTTP to that collector.
-  - OTEL_TRACES_EXPORTER=console -> spans are printed to stdout (handy
-    for local debugging).
-  - Neither -> spans are created but not exported anywhere.
+Where telemetry goes is controlled by the standard OTel env vars, so
+nothing here is tied to one backend:
+  - OTEL_EXPORTER_OTLP_ENDPOINT set -> traces and metrics are exported
+    over OTLP/HTTP to that collector (on AWS, the ADOT sidecar).
+  - OTEL_TRACES_EXPORTER=console / OTEL_METRICS_EXPORTER=console ->
+    printed to stdout instead (handy for local debugging).
+  - Neither -> created but not exported anywhere.
+
+The game metrics themselves are defined in game_metrics.py.
 """
 import os
 
 from fastapi import FastAPI
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider
+from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
+from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
+    ConsoleMetricExporter,
+    MetricReader,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
@@ -42,9 +52,25 @@ DEFAULT_SERVICE_NAME = "snake-arena-backend"
 # real traffic and cost money to store.
 EXCLUDED_URLS = "/api/health"
 
+# Export counts as "change since last export" rather than running totals.
+# CloudWatch metrics are per-period values, and the collector's CloudWatch
+# exporter discards the first running-total point from every new task.
+DELTA_TEMPORALITY = {
+    Counter: AggregationTemporality.DELTA,
+    Histogram: AggregationTemporality.DELTA,
+}
+
+
+# Exponential histograms carry the value distribution through to
+# CloudWatch, which can then compute percentiles (e.g. median score);
+# the default explicit-bucket histogram arrives as only min/max/sum/count.
+HISTOGRAM_VIEWS = [
+    View(instrument_type=Histogram, aggregation=ExponentialBucketHistogramAggregation())
+]
+
 
 def build_resource() -> Resource:
-    """The service/environment/version attributes attached to every span."""
+    """The service/environment/version attributes attached to all telemetry."""
     environment = os.environ.get("APP_ENVIRONMENT", "local")
     return Resource.create(
         {
@@ -56,15 +82,25 @@ def build_resource() -> Resource:
     )
 
 
-def _add_exporter(provider: TracerProvider) -> None:
-    exporter_choice = os.environ.get("OTEL_TRACES_EXPORTER", "").lower()
+def _exporter_choice(signal: str) -> str:
+    """"console", "otlp", or "" (none) for OTEL_<signal>_EXPORTER."""
+    choice = os.environ.get(f"OTEL_{signal}_EXPORTER", "").lower()
+    if choice == "console":
+        return "console"
     otlp_endpoint_set = bool(
         os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        or os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.environ.get(f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT")
     )
-    if exporter_choice == "console":
+    if choice in ("", "otlp") and otlp_endpoint_set:
+        return "otlp"
+    return ""
+
+
+def _add_span_exporter(provider: TracerProvider) -> None:
+    choice = _exporter_choice("TRACES")
+    if choice == "console":
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-    elif exporter_choice in ("", "otlp") and otlp_endpoint_set:
+    elif choice == "otlp":
         # Imported lazily so the exporter's protobuf/requests deps load
         # only when actually exporting.
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
@@ -74,14 +110,37 @@ def _add_exporter(provider: TracerProvider) -> None:
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
 
 
-def setup_telemetry(app: FastAPI, engine: Engine) -> TracerProvider:
-    """Install the tracer provider and instrument FastAPI + SQLAlchemy."""
-    provider = TracerProvider(resource=build_resource())
-    _add_exporter(provider)
-    trace.set_tracer_provider(provider)
+def _metric_readers() -> list[MetricReader]:
+    choice = _exporter_choice("METRICS")
+    if choice == "console":
+        exporter = ConsoleMetricExporter(preferred_temporality=DELTA_TEMPORALITY)
+    elif choice == "otlp":
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+
+        exporter = OTLPMetricExporter(preferred_temporality=DELTA_TEMPORALITY)
+    else:
+        return []
+    # Default interval: every 60s, matching CloudWatch's 1-minute resolution.
+    return [PeriodicExportingMetricReader(exporter)]
+
+
+def setup_telemetry(app: FastAPI, engine: Engine) -> None:
+    """Install tracer/meter providers and instrument FastAPI + SQLAlchemy."""
+    resource = build_resource()
+
+    tracer_provider = TracerProvider(resource=resource)
+    _add_span_exporter(tracer_provider)
+    trace.set_tracer_provider(tracer_provider)
+
+    metrics.set_meter_provider(
+        MeterProvider(
+            resource=resource, metric_readers=_metric_readers(), views=HISTOGRAM_VIEWS
+        )
+    )
 
     FastAPIInstrumentor.instrument_app(
-        app, tracer_provider=provider, excluded_urls=EXCLUDED_URLS
+        app, tracer_provider=tracer_provider, excluded_urls=EXCLUDED_URLS
     )
-    SQLAlchemyInstrumentor().instrument(engine=engine, tracer_provider=provider)
-    return provider
+    SQLAlchemyInstrumentor().instrument(engine=engine, tracer_provider=tracer_provider)

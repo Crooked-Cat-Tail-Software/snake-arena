@@ -33,9 +33,9 @@ backend → frontend → tests, with a human review checkpoint after each.
       role (no stored credentials) and validates it via `/api/health`
       — **deploy jobs blocked** until advanced features are activated
       in AWS Settings (see "CI/CD" below); deploy with the scripts
-- [x] OpenTelemetry tracing in the backend — every span tagged with
-      service name, environment, and deployed version (see
-      "Telemetry" below)
+- [x] OpenTelemetry tracing and game metrics in the backend — tagged
+      with service name, environment, and deployed version; on AWS sent
+      to X-Ray and CloudWatch, with alarms (see "Telemetry" below)
 
 ## Requirements
 
@@ -284,8 +284,21 @@ tests.
 
 The backend emits OpenTelemetry traces — one span per API request and
 per database query (`backend/app/telemetry.py`). `/api/health` is not
-traced, since the load balancer polls it every few seconds. Every span
-carries three resource attributes:
+traced, since the load balancer polls it every few seconds. It also
+emits five game metrics (`backend/app/game_metrics.py`):
+
+| Metric | What it counts |
+|---|---|
+| `scores.submitted` | accepted scores — roughly, games finished |
+| `scores.value` | distribution of accepted scores (average, min, max, percentiles) |
+| `scores.rejected` | rejected submissions, labelled `reason` = `player_name` / `score` / `malformed` |
+| `leaderboard.reads` | leaderboard requests |
+| `leaderboard.new_top_score` | scores that beat every earlier score (a tie doesn't count) |
+
+Never label a metric by player name: on CloudWatch every distinct label
+combination is a separately billed metric.
+
+All traces and metrics carry three resource attributes:
 
 | Attribute | Comes from | Values |
 |---|---|---|
@@ -296,17 +309,18 @@ carries three resource attributes:
 Where spans go is set with the standard OTel environment variables:
 - `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` — export over
   OTLP/HTTP to any OpenTelemetry collector.
-- `OTEL_TRACES_EXPORTER=console` — print spans to stdout, for local
-  debugging:
+- `OTEL_TRACES_EXPORTER=console` / `OTEL_METRICS_EXPORTER=console` —
+  print spans / metrics (every 60s) to stdout, for local debugging:
   ```
-  OTEL_TRACES_EXPORTER=console uv run uvicorn app.main:app --port 8000
+  OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console uv run uvicorn app.main:app --port 8000
   ```
 - Neither set (the default locally) — spans are created but not sent
   anywhere.
 
-On AWS, the ECS task runs an ADOT collector sidecar that forwards
-traces to AWS X-Ray — see "Tracing" in
-[infra/aws/README.md](infra/aws/README.md) for where to view them.
+On AWS, the ECS task runs an ADOT collector sidecar that forwards traces
+to AWS X-Ray and metrics to CloudWatch (namespace `SnakeArena`), and two
+alarms watch for server errors and high memory — see "Tracing, metrics
+and alarms" in [infra/aws/README.md](infra/aws/README.md).
 
 ## Deploy to AWS
 

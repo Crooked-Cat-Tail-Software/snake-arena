@@ -162,7 +162,11 @@ their version); `APP_ENVIRONMENT` is set per deployment, never baked in.
 The OTel SDK (1.x) and contrib instrumentations (0.x betas) in
 `backend/requirements.txt` must be upgraded as a matched pair. On AWS,
 traces go app → ADOT collector sidecar (`02-app.yaml`, bound to
-127.0.0.1) → X-Ray. Any new IAM role in `02-app.yaml` must also be added
+127.0.0.1) → X-Ray, and game metrics (`backend/app/game_metrics.py`) →
+the same collector → CloudWatch (`SnakeArena`). Metric labels must stay
+low-cardinality (never player names); a new metric or label also needs
+a matching `metric_declarations` entry in the collector config, or it is
+silently not published. Any new IAM role in `02-app.yaml` must also be added
 to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
 CI deploys will fail with AccessDenied once they work. (They don't yet:
 the deploy role stacks can't be created on this AWS project until

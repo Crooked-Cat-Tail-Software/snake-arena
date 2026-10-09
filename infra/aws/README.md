@@ -19,7 +19,8 @@ your own AWS credentials.
                     [Application Load Balancer]  (public subnets, port 80)
                             |
                     [ECS Fargate task]  (backend + built frontend, port 8000)
-                            |    + ADOT collector sidecar --> AWS X-Ray (traces)
+                            |    + ADOT collector sidecar --> X-Ray (traces),
+                            |                                 CloudWatch (metrics)
                     [RDS Postgres]  (not publicly reachable -- only the
                                       ECS task's security group can reach it)
 ```
@@ -45,13 +46,30 @@ variables the task definition sets, instead of a single `DATABASE_URL`
 of, not instead of, the existing `DATABASE_URL` support used locally and
 by `docker-compose.yml`.
 
-### Tracing (AWS X-Ray)
+### Tracing, metrics and alarms
 
 The ECS task runs two containers: the app, and an AWS Distro for
 OpenTelemetry (ADOT) collector sidecar. The app sends its OpenTelemetry
-traces (see "Telemetry" in the top-level README) to the collector on
-`localhost:4318`; the collector forwards them to X-Ray using the task
-role `<project>-ecs-task-role`, which can only write traces.
+traces and game metrics (see "Telemetry" in the top-level README) to the
+collector on `localhost:4318`; the collector forwards traces to X-Ray and
+metrics to CloudWatch using the task role `<project>-ecs-task-role`, which
+can only write traces and write to the `/ecs/<project>/metrics` log group.
+
+- **Metrics:** CloudWatch → Metrics → `SnakeArena` namespace, one series
+  per environment (`deployment.environment.name`), plus `reason` on
+  `scores.rejected`. They arrive about once a minute. For
+  `scores.value`, the `p50` statistic is the median score. The collector
+  writes them as Embedded Metric Format records to
+  `/ecs/<project>/metrics` (kept 7 days; the metrics themselves are kept
+  by CloudWatch for 15 months). Only the five declared metrics, with only
+  the declared dimensions, are published — see `awsemf` in `02-app.yaml`
+  before adding labels, since each label combination is billed.
+- **Alarms:** `<project>-5xx-errors` (5+ server errors from the app or
+  load balancer in 5 minutes) and `<project>-memory-high` (task memory
+  above 80% for 15 minutes). To get emails, deploy with
+  `ALARM_EMAIL=you@example.com ./deploy.sh` and click the confirmation
+  link AWS sends; the address sticks for later deploys, and
+  `ALARM_EMAIL= ./deploy.sh` turns emails off.
 
 - **Where to look:** CloudWatch console → Application Signals → Traces
   (or X-Ray → Traces), in `us-east-2`. Filter one environment with
@@ -139,11 +157,15 @@ check the Pricing Calculator link below for exact `us-east-2` numbers:
 | Application Load Balancer (base) | ~$0.0225/hr | ~$16 |
 | Fargate (0.25 vCPU / 0.5GB) | ~$0.045/hr combined | ~$9 |
 | X-Ray traces | first 100,000/month free, then $5/million | ~$0 |
+| CloudWatch custom metrics (7 series) | ~$0.30/metric-month | ~$2 |
+| CloudWatch alarms (3 metrics watched) | ~$0.10/metric-month | ~$0.30 |
 | **Total** | | **~$38-40/month** |
 
 The ADOT collector sidecar fits in the existing task size, so it adds no
 Fargate cost; at this game's traffic X-Ray stays inside its free monthly
-allowance. That excludes ALB data-processing charges and data transfer, which are
+allowance. The metrics row counts one series per metric plus one per
+rejection reason (`scores.rejected` has three), per environment — prod
+doubles it. Metric logs and alarm emails are pennies. That excludes ALB data-processing charges and data transfer, which are
 usually small for a class exercise but not exactly zero. Two things can
 reduce this a lot:
 
@@ -372,8 +394,9 @@ Environment named `production` that requires approval.
 `deploy.sh` needs: push images to this project's ECR repo, create/update
 the two `snake-arena-ecr`/`snake-arena-app` CloudFormation stacks, and
 manage the two IAM roles (`snake-arena-ecs-execution-role` and
-`snake-arena-ecs-task-role`, the X-Ray-write-only role the tracing
-collector uses) those stacks create — it cannot touch any other IAM role, user, or resource outside
+`snake-arena-ecs-task-role`, the role the telemetry collector uses to
+write traces and metrics) those stacks create, plus this project's
+`snake-arena-*` alarms and alarm-email SNS topic — it cannot touch any other IAM role, user, or resource outside
 those two stacks. The VPC/RDS/ECS/ALB permissions are necessarily
 broader than a single resource ARN, since AWS doesn't support
 resource-level restrictions for most of those services' *create*

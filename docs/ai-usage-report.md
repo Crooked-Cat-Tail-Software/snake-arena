@@ -1103,3 +1103,62 @@ the repo root -- the top-level README showed `./build.sh` without its
 `infra/aws/` path; fixed there. Docs updated: top-level `README.md` (CI
 block note, status, script paths), `infra/aws/README.md` (what to do once
 unblocked), `AGENTS.md`.
+
+## Stage 17 — Game metrics and alarms
+
+**Asked:** after Claude listed metric options, "implement that": five
+game metrics plus alarms on load-balancer 5xx errors and ECS memory.
+
+**Generated/changed:**
+- `backend/app/game_metrics.py` (new) — `scores.submitted`,
+  `scores.value` (histogram), `scores.rejected` (label `reason`:
+  `player_name` / `score` / `malformed`), `leaderboard.reads`,
+  `leaderboard.new_top_score` (strictly beats every earlier score; ties
+  don't count, matching the leaderboard's earlier-wins tie-break).
+  Attached to `app.state` so tests can swap in an in-memory reader.
+- `backend/app/telemetry.py` — meter provider with the same resource
+  attributes; OTLP or console export via `OTEL_METRICS_EXPORTER`;
+  delta temporality (CloudWatch's exporter drops the first cumulative
+  point per task); exponential histograms so CloudWatch can compute
+  percentiles.
+- `backend/app/main.py` — counts submissions, new #1s and leaderboard
+  reads; a `RequestValidationError` handler counts rejected `POST
+  /api/scores` and then delegates to FastAPI's default handler, so the
+  422 body `openapi.yaml` documents is unchanged (no contract change).
+  `crud.get_high_score` added.
+- `infra/aws/02-app.yaml` — collector metrics pipeline → `awsemf`
+  (namespace `SnakeArena`, `NoDimensionRollup`, `metric_declarations`
+  limiting publication to the five metrics with environment / environment
+  + reason dimensions); `/ecs/<project>/metrics` log group (7 days); task
+  role may write only to it; `ServerErrorsAlarm` (target + ELB 5xx ≥ 5 in
+  5 min) and `MemoryHighAlarm` (> 80% for 15 min); optional `AlarmEmail`
+  parameter → SNS topic + email subscription.
+- `infra/aws/deploy.sh` — optional `ALARM_EMAIL` env var.
+- `infra/aws/00-github-oidc.yaml` — deploy role may manage
+  `<project>-*` alarms and SNS topics (still blocked until advanced
+  features are activated, kept accurate for then).
+- `tests/test_game_metrics.py` (new, 8 tests). Docs: `README.md`,
+  `infra/aws/README.md`, `AGENTS.md`.
+
+**Decisions made by Claude (open to override):** alarm thresholds (5
+errors / 5 min; 80% memory / 15 min); emails opt-in; 7-day retention for
+raw metric logs.
+
+**Caught during verification:** the first version's `scores.value`
+reached CloudWatch as min/max/sum/count only — no median, which Claude had
+promised. Switched to exponential histograms and re-verified.
+
+**Verified:** 27/27 tests pass (16 consecutive clean runs). One earlier
+run had a single failure, right after Claude removed test containers that
+had been using the same `snake_arena_test` database; it was not captured
+and has not recurred. `cfn-lint` and `shellcheck` clean. Ran the real
+`aws-otel-collector:v0.50.0` with the template's exact config, changed
+only to print CloudWatch records to stdout, and sent real traffic to the
+app image: namespace `SnakeArena`; only `deployment.environment.name`
+(and `reason`) as dimensions; values exactly as expected (3 submitted, 2
+new #1s, 1 read, 1 rejection per reason, a bad `?limit=` not counted);
+`scores.value` arrived as Values/Counts.
+
+**Not verified:** a real deploy — metrics arriving in CloudWatch, the
+task role's log permissions being sufficient, alarms evaluating, and the
+SNS email flow.

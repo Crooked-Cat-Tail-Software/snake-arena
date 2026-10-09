@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -23,3 +23,8 @@ def get_top_scores(db: Session, limit: int = 10) -> list[models.ScoreRecord]:
         .limit(limit)
     )
     return list(db.scalars(stmt).all())
+
+
+def get_high_score(db: Session) -> int | None:
+    """The current #1 score, or None if no scores exist yet."""
+    return db.scalar(select(func.max(models.ScoreRecord.score)))

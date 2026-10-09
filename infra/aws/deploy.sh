@@ -28,6 +28,9 @@ AWS_REGION="${2:-us-east-2}"
 DB_DELETION_PROTECTION="${3:-false}"
 IMAGE_TAG="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Optional: set ALARM_EMAIL=you@example.com to get alarm emails (see
+# AlarmEmail in 02-app.yaml). Unset keeps the stack's current setting;
+# ALARM_EMAIL= (empty) turns notifications off.
 # Reported on every trace as deployment.environment.name.
 case "$PROJECT_NAME" in
   *-prod) DEPLOY_ENV=prod ;;
@@ -80,6 +83,7 @@ aws cloudformation deploy \
   --template-file "$SCRIPT_DIR/02-app.yaml" \
   --parameter-overrides ProjectName="$PROJECT_NAME" ImageUri="$IMAGE_URI" \
     DBDeletionProtection="$DB_DELETION_PROTECTION" DeploymentEnvironment="$DEPLOY_ENV" \
+    ${ALARM_EMAIL+AlarmEmail="$ALARM_EMAIL"} \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$AWS_REGION"
