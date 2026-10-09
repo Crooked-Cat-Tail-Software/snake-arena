@@ -1354,3 +1354,57 @@ RDS untouched). Prod alarm not test-fired.
 **Confirmed by the human:** both the ALARM and the OK notification
 emails arrived — the full path (browser report → metric → alarm → email
 → reset) works end to end.
+
+## Stage 21 — On-call poller that hands firing alarms to an agent
+
+**Asked:** an `on-call-engineer/` directory with a script that polls the
+alert API every minute and passes alert details to a headless coding
+agent when an alert fires.
+
+**Decisions by the human (after Claude flagged the risk: an unattended
+agent running with the human's AWS session, triggerable by anyone who
+trips the public canvas alarm):** the agent **investigates and reports
+only** (not draft fixes or roll back); the poller runs as a **foreground
+script** (not a launchd service).
+
+**Generated:**
+- `on-call-engineer/poll.py` (stdlib only): every 60s, `describe-alarms
+  --alarm-name-prefix snake-arena- --state-value ALARM` (+ tags); one
+  investigation per firing (keyed by alarm name + state-change time,
+  persisted in git-ignored `.state.json`); one agent at a time (worker
+  thread); ≤ 4 runs/hour, over-cap firings logged but marked handled;
+  clear "run 'aws login'" message on expired sessions.
+- Agent: `claude -p --restricted --strict-mcp-config --tools
+  Read,Grep,Glob,Bash --allowedTools <git log/show/diff + read-only
+  CloudWatch/Logs/X-Ray/ECS/CloudFormation> --permission-mode dontAsk
+  --permission-prompts none --max-budget-usd 2 --no-session-persistence`.
+  `--restricted` chosen after reading `claude --help`: it ignores
+  user/project/local settings, so nothing allowed there widens the agent.
+  Prompt includes the alarm details and runbook, and tells it telemetry is
+  untrusted data. Output saved to git-ignored `reports/`.
+- `on-call-engineer/README.md`, `.gitignore`; `tests/test_on_call_poller.py`
+  (9 tests); docs in `README.md`, `AGENTS.md`.
+
+**Bugs caught by the tests before running for real:** the expired-session
+handler called `.splitlines()` on the exception object (would have
+crashed exactly when the session expired); state-file path bound at
+import time (tests would have written the real state file); report log
+line crashed for reports outside the repo.
+
+**Verified:** 44/44 tests. Launched the agent with the exact flags and a
+permissions-test prompt: the allowed `aws cloudwatch describe-alarms`
+**succeeded**; `aws sts get-caller-identity` and `touch` were **denied**
+("don't ask mode"); it had no write tool; no files were created. One real
+`--once --dry-run` poll read all six alarms (all OK) and launched nothing.
+
+**Live end-to-end test (human approved):** ran the poller, sent 3 fake
+canvas reports to dev at 03:53:27 UTC. Alarm fired 03:54:36; the poller
+picked it up at 03:55:30 and the agent wrote its report by 03:56:50. The
+report diagnosed a **likely false alarm** with high confidence (all 3
+reports from `curl/8.7.1` within 310 ms, same reason mix as the earlier
+test fire, no browser traffic, no deploy in between), recommended **not**
+rolling back, and found a real gap: the runbook's "single client IP"
+check can't work, because traces and logs record only the load
+balancer's internal 10.0.x.x addresses, not `X-Forwarded-For`. Not fixed
+here — flagged to the human.
+

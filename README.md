@@ -343,6 +343,13 @@ topic, a CloudWatch dashboard with environment and version dropdowns, and
 an X-Ray group per environment. See "Observability" in
 [infra/aws/README.md](infra/aws/README.md).
 
+### On-call agent
+
+`on-call-engineer/poll.py` polls the dev and prod alarms every minute and,
+when one fires, has a read-only Claude Code agent investigate it and
+write a diagnosis report. See
+[on-call-engineer/README.md](on-call-engineer/README.md).
+
 ## Deploy to AWS
 
 `infra/aws/` has CloudFormation templates and a deploy script that run

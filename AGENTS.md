@@ -28,6 +28,7 @@ snake-arena/
 ├── tests/                    # pytest — backend/API tests + frontend/e2e tests
 │   └── integration/          # pytest — runs real `docker compose build`/`up`
 ├── pytest.ini                # registers the `integration` marker
+├── on-call-engineer/          # poll.py: alarm poller -> read-only agent reports
 ├── infra/
 │   └── aws/                  # CloudFormation + build/deploy/promote/teardown scripts
 ├── .github/
@@ -181,7 +182,11 @@ running version (taken from `ImageUri`'s tag) -- keep its description
 under CloudWatch's 1,024-character limit. The
 ADOT collector image has no `transform` processor (it fails to start
 with one); per-span attribute changes go in the app
-(`telemetry.py`'s `ResourceAttributesOnSpans`). Any new IAM role in `02-app.yaml` must also be added
+(`telemetry.py`'s `ResourceAttributesOnSpans`). The on-call agent (`on-call-engineer/poll.py`)
+must stay read-only: never add Edit/Write tools or mutating commands
+(deploy, put-/create-/delete-/update-, git push/commit) to its allowlist --
+it runs unattended and can be triggered by anyone who trips the public
+canvas alarm. `tests/test_on_call_poller.py` enforces this. Any new IAM role in `02-app.yaml` must also be added
 to the deploy role's scoped IAM statements in `00-github-oidc.yaml`, or
 CI deploys will fail with AccessDenied once they work. (They don't yet:
 the deploy role stacks can't be created on this AWS project until
