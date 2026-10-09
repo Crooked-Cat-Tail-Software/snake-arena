@@ -1276,6 +1276,19 @@ image): dev alarms now point at `snake-arena-alarms`, dev metrics write
 to stream `snake-arena` in `/snake-arena/metrics`, old per-app metrics
 log group removed.
 
+**Then (human approved: commit, build dev, promote prod):** committed
+(`098a389`), built `20261009-022941-098a389`, deployed dev: 64 dev traces
+matched `annotation.deployment_environment_name = "dev" AND
+annotation.service_version = "20261009-022941-098a389"` — the annotation
+fix works. Promoted to prod with `promote.sh` (same image digest as dev;
+healthy on the first check). Prod: alarms → `snake-arena-alarms`; 52
+traces matched the prod group's filter; metrics stream `snake-arena-prod`
+in the shared log group; the dashboard's prod expression returned 6
+leaderboard reads (5 sent + 1 count check). Prod's RDS instance was not
+touched (created 2026-10-07, no RDS stack events today, deletion
+protection still on); its leaderboard was already empty. Only read-only
+requests were sent to prod.
+
 **Not verified:** the dashboard's dropdowns in the console (the browser
 pane isn't signed in to AWS, and Claude doesn't enter sign-in
-credentials).
+credentials); alarm emails (none configured).
