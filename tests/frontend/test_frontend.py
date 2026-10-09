@@ -8,6 +8,8 @@ manual review — see docs/ai-usage-report.md for the full story.
 """
 import uuid
 
+import pytest
+
 
 def test_name_field_accepts_movement_key_letters(game_page):
     """Regression test: the game's keyboard handler used to intercept
@@ -122,3 +124,26 @@ def test_canvas_creation_exception_reported_as_exception(page, app_urls):
     page.wait_for_timeout(500)
 
     assert reports == [{"kind": "canvas_creation", "reason": "exception"}]
+
+
+@pytest.mark.parametrize("name", ["Łukasz", "李明", "Анна", "🐍 Snake"])
+def test_game_starts_for_names_beyond_latin_1(page, app_urls, name):
+    """Regression test from the stage 24 incident drill: per-player snake
+    colors hashed btoa(name), which throws for characters above U+00FF, so
+    players with names like these got the canvas-failure panel instead of
+    a game. Every other test uses ASCII names, so nothing caught it."""
+    reports = []
+    page.on(
+        "request",
+        lambda req: reports.append(req.post_data_json)
+        if req.method == "POST" and req.url.endswith("/api/client-errors")
+        else None,
+    )
+    page.goto(f"{app_urls['frontend']}/index.html")
+    page.fill("#player-name", name)
+    page.click("#start-button")
+
+    page.wait_for_selector("#game-canvas")
+    page.wait_for_timeout(300)
+    assert page.is_hidden("#canvas-error")
+    assert reports == []
