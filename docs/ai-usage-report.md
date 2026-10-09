@@ -1408,3 +1408,27 @@ check can't work, because traces and logs record only the load
 balancer's internal 10.0.x.x addresses, not `X-Forwarded-For`. Not fixed
 here — flagged to the human.
 
+## Stage 22 — Record real client IPs (X-Forwarded-For)
+
+**Asked:** fix the gap the on-call agent found in Stage 21: the canvas
+runbook's "single client IP" check couldn't work, because logs and X-Ray
+recorded only the load balancer's internal 10.0.x.x addresses.
+
+**Found:** uvicorn 0.52.4 already honors `X-Forwarded-For`, but trusts it
+only from `127.0.0.1` by default (`FORWARDED_ALLOW_IPS`); the ALB connects
+from inside the VPC. uvicorn walks the header right to left and takes the
+first untrusted address — the one the ALB appends — so trusting the VPC
+doesn't let clients spoof their IP. The ECS security group already admits
+port 8000 only from the ALB.
+
+**Changed:** `02-app.yaml` sets `FORWARDED_ALLOW_IPS` to `!Ref VpcCidr`
+(no code change; local/Compose unchanged — header stays untrusted there);
+runbook step 4 now names X-Ray's `ClientIp` and `UserAgent`. Description
+842 chars rendered. Docs: `infra/aws/README.md`.
+
+**Verified locally with a real uvicorn (console exporter):** trusted proxy
++ `X-Forwarded-For: 203.0.113.9` → access log and span `net.peer.ip` =
+203.0.113.9; spoof attempt `6.6.6.6, 198.51.100.7` → 198.51.100.7 (fake
+ignored); untrusted sender with `X-Forwarded-For: 6.6.6.6` → 127.0.0.1
+(header ignored). `cfn-lint` clean.
+

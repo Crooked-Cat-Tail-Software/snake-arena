@@ -104,6 +104,10 @@ can only write traces and write to that log group.
   task's 512 MB. Measured locally: ~30 MB under load.
 - **Logs:** the collector's own logs are in the app's log group, under
   the `otel/` stream prefix.
+- **Client IPs:** the app trusts `X-Forwarded-For` only from inside the
+  VPC (`FORWARDED_ALLOW_IPS` = the VPC CIDR; only the load balancer can
+  reach the task), so access logs and X-Ray's `ClientIp` show the real
+  client, and a client-supplied `X-Forwarded-For` can't fake it.
 - **Turning it off:** remove the `otel-collector` container and the
   app's `OTEL_EXPORTER_OTLP_ENDPOINT` from `02-app.yaml`; the app then
   creates spans but exports none.

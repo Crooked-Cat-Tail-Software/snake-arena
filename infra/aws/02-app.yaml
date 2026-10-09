@@ -418,6 +418,14 @@ Resources:
             # by build.sh, so it isn't set here.
             - Name: APP_ENVIRONMENT
               Value: !Ref DeploymentEnvironment
+            # Trust X-Forwarded-For only from inside the VPC (the ALB --
+            # the only thing ECSSecurityGroup lets reach port 8000), so logs
+            # and X-Ray record the real client IP instead of the ALB's
+            # 10.0.x.x address. uvicorn reads the header right to left and
+            # takes the first untrusted address, which is the one the ALB
+            # appended, so a client-supplied X-Forwarded-For can't spoof it.
+            - Name: FORWARDED_ALLOW_IPS
+              Value: !Ref VpcCidr
             # The collector sidecar below -- containers in one Fargate task
             # share localhost.
             - Name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -693,7 +701,8 @@ Resources:
           App.jsx. 3) Only no_2d_context, no recent deploy: likely a browser
           or extension change; try several browsers. 4) Sudden burst: the
           report endpoint is public; check X-Ray traces of POST
-          /api/client-errors for a single client IP (possible false alarm).
+          /api/client-errors for one ClientIp or a non-browser UserAgent
+          (possible false alarm).
         - Version: !Select [1, !Split [":", !Ref ImageUri]]
           DashboardUrl:
             Fn::ImportValue: !Sub "${ObservabilityStackName}-DashboardUrl"
