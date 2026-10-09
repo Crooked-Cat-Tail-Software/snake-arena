@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SnakeGame } from "./game.js";
-import { fetchLeaderboard, submitScore } from "./api.js";
+import { CanvasUnavailableError, SnakeGame } from "./game.js";
+import { fetchLeaderboard, reportClientError, submitScore } from "./api.js";
 import StartScreen from "./components/StartScreen.jsx";
 import GameOverScreen from "./components/GameOverScreen.jsx";
 import Leaderboard from "./components/Leaderboard.jsx";
@@ -16,6 +16,20 @@ const KEY_DIRECTIONS = {
   d: [1, 0],
 };
 
+// At most one canvas-failure report per page load, so one player retrying
+// counts once toward the alert threshold (and React StrictMode's doubled
+// effects in development don't double-report).
+let canvasFailureReported = false;
+
+function reportCanvasFailure(err) {
+  if (canvasFailureReported) return;
+  canvasFailureReported = true;
+  reportClientError(
+    "canvas_creation",
+    err instanceof CanvasUnavailableError ? "no_2d_context" : "exception"
+  );
+}
+
 export default function App() {
   const [screen, setScreen] = useState("start"); // "start" | "playing" | "gameover"
   const [playerName, setPlayerName] = useState("");
@@ -24,6 +38,7 @@ export default function App() {
   const [submitStatus, setSubmitStatus] = useState({ text: "", kind: "" });
   const [leaderboard, setLeaderboard] = useState([]);
   const [leaderboardStatus, setLeaderboardStatus] = useState("");
+  const [canvasFailed, setCanvasFailed] = useState(false);
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
@@ -90,16 +105,26 @@ export default function App() {
   useEffect(() => {
     if (screen !== "playing" || !canvasRef.current) return undefined;
 
-    const game = new SnakeGame(canvasRef.current, {
-      onScoreChange: setCurrentScore,
-      onGameOver: (score) => {
-        setFinalScore(score);
-        setScreen("gameover");
-        trySubmit(score);
-      },
-    });
+    let game;
+    try {
+      game = new SnakeGame(canvasRef.current, {
+        onScoreChange: setCurrentScore,
+        onGameOver: (score) => {
+          setFinalScore(score);
+          setScreen("gameover");
+          trySubmit(score);
+        },
+      });
+      game.start();
+    } catch (err) {
+      // The board can't run in this browser: say so instead of leaving a
+      // blank canvas, and report it (see reportCanvasFailure above).
+      game?.stop();
+      setCanvasFailed(true);
+      reportCanvasFailure(err);
+      return undefined;
+    }
     gameRef.current = game;
-    game.start();
 
     return () => {
       game.stop();
@@ -113,6 +138,7 @@ export default function App() {
     playerNameRef.current = name;
     setCurrentScore(0);
     setSubmitStatus({ text: "", kind: "" });
+    setCanvasFailed(false);
     setScreen("playing");
   }
 
@@ -141,7 +167,20 @@ export default function App() {
                   Score: <strong id="current-score">{currentScore}</strong>
                 </span>
               </div>
-              <canvas id="game-canvas" ref={canvasRef} width={400} height={400} tabIndex={0} />
+              {canvasFailed ? (
+                <div id="canvas-error" className="panel" role="alert">
+                  <p>
+                    The game board couldn't start in this browser. Try turning on hardware
+                    acceleration, disabling extensions that block canvas, or using another
+                    browser.
+                  </p>
+                  <button type="button" onClick={handlePlayAgain}>
+                    Back
+                  </button>
+                </div>
+              ) : (
+                <canvas id="game-canvas" ref={canvasRef} width={400} height={400} tabIndex={0} />
+              )}
             </>
           )}
 

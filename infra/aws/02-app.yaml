@@ -81,6 +81,13 @@ Parameters:
       forwards the app's traces to AWS X-Ray. Pinned to a release; must be
       v0.34.0 or newer (older versions silently drop W3C-format trace IDs).
 
+  AlertOwner:
+    Type: String
+    Default: dbrown77
+    Description: >
+      Who responds to this app's alerts. Shown in the alert text (and the
+      notification email) and set as the alarm's "owner" tag.
+
   ObservabilityStackName:
     Type: String
     Default: snake-arena-observability
@@ -499,6 +506,7 @@ Resources:
                         - dimensions: [[deployment.environment.name, service.version, reason]]
                           metric_name_selectors:
                             - "^scores[.]rejected$"
+                            - "^client[.]canvas_creation_failures$"
                   service:
                     extensions: [health_check]
                     pipelines:
@@ -658,6 +666,89 @@ Resources:
         - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
       OKActions:
         - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+
+  # Actionable alert: players can't start the game. Each failure is one
+  # page load whose game canvas couldn't start (the browser reports at
+  # most once per page load, so one player retrying counts once). One
+  # failure is usually one player's browser quirk; 3+ in 10 minutes means
+  # several real players can't play at all -- at this game's traffic, an
+  # outage. Watches only the version this stack is running (taken from the
+  # image tag, which build.sh also bakes in as service.version), so the
+  # alert names the release that's failing; every deploy/promote updates it.
+  CanvasCreationFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-canvas-creation-failures"
+      AlarmDescription: !Sub
+        - >-
+          Players can't start the game: 3+ page loads failed to create the
+          game canvas in 10 minutes.
+          service=snake-arena-backend environment=${DeploymentEnvironment}
+          version=${Version} owner=${AlertOwner}
+          dashboard=${DashboardUrl} (set Environment=${DeploymentEnvironment}).
+          Runbook: 1) Dashboard "Canvas creation failures" chart: which
+          reason, which version. 2) Began right after deploying this
+          version? Roll back: infra/aws/deploy.sh (dev) or redeploy the
+          previous tag (prod), then investigate frontend/src/game.js and
+          App.jsx. 3) Only no_2d_context, no recent deploy: likely a browser
+          or extension change; try several browsers. 4) Sudden burst: the
+          report endpoint is public; check X-Ray traces of POST
+          /api/client-errors for a single client IP (possible false alarm).
+        - Version: !Select [1, !Split [":", !Ref ImageUri]]
+          DashboardUrl:
+            Fn::ImportValue: !Sub "${ObservabilityStackName}-DashboardUrl"
+      Metrics:
+        - Id: failures
+          Label: Canvas creation failures (all reasons)
+          Expression: FILL(nocontext, 0) + FILL(exception, 0)
+          ReturnData: true
+        - Id: nocontext
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: SnakeArena
+              MetricName: client.canvas_creation_failures
+              Dimensions:
+                - Name: deployment.environment.name
+                  Value: !Ref DeploymentEnvironment
+                - Name: service.version
+                  Value: !Select [1, !Split [":", !Ref ImageUri]]
+                - Name: reason
+                  Value: no_2d_context
+            Period: 600
+            Stat: Sum
+        - Id: exception
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: SnakeArena
+              MetricName: client.canvas_creation_failures
+              Dimensions:
+                - Name: deployment.environment.name
+                  Value: !Ref DeploymentEnvironment
+                - Name: service.version
+                  Value: !Select [1, !Split [":", !Ref ImageUri]]
+                - Name: reason
+                  Value: exception
+            Period: 600
+            Stat: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 3
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "${ObservabilityStackName}-AlarmTopicArn"
+      Tags:
+        - Key: service
+          Value: snake-arena-backend
+        - Key: environment
+          Value: !Ref DeploymentEnvironment
+        - Key: version
+          Value: !Select [1, !Split [":", !Ref ImageUri]]
+        - Key: owner
+          Value: !Ref AlertOwner
 
 Outputs:
   AppUrl:

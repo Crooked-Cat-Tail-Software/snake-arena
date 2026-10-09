@@ -72,3 +72,53 @@ def test_play_again_returns_to_start_screen(game_page):
     game_page.click("#play-again-button")
     assert game_page.is_visible("#start-screen")
     assert game_page.is_hidden("#game-over-screen")
+
+
+def _open_with_broken_canvas(page, app_urls, get_context_js):
+    """Loads the game with HTMLCanvasElement.getContext replaced, recording
+    every POST /api/client-errors body the page sends."""
+    reports = []
+    page.on(
+        "request",
+        lambda req: reports.append(req.post_data_json)
+        if req.method == "POST" and req.url.endswith("/api/client-errors")
+        else None,
+    )
+    page.add_init_script(f"HTMLCanvasElement.prototype.getContext = {get_context_js};")
+    page.goto(f"{app_urls['frontend']}/index.html")
+    return reports
+
+
+def _try_to_start(page, name):
+    page.fill("#player-name", name)
+    page.click("#start-button")
+    page.wait_for_selector("#canvas-error")
+
+
+def test_canvas_without_2d_context_shows_message_and_reports_once(page, app_urls):
+    """A browser that gives the canvas no 2D context (e.g. hardware
+    acceleration off) gets a clear message instead of a blank board, and
+    the failure is reported -- once per page load, even if the player
+    retries, so one player can't trip the alert on their own."""
+    reports = _open_with_broken_canvas(page, app_urls, "() => null")
+
+    _try_to_start(page, "NoCanvas")
+    assert page.is_hidden("#game-canvas")
+    assert "couldn't start" in page.inner_text("#canvas-error")
+
+    page.click("#canvas-error button")  # Back to the start screen...
+    _try_to_start(page, "NoCanvas")  # ...and fail again.
+    page.wait_for_timeout(500)
+
+    assert reports == [{"kind": "canvas_creation", "reason": "no_2d_context"}]
+
+
+def test_canvas_creation_exception_reported_as_exception(page, app_urls):
+    reports = _open_with_broken_canvas(
+        page, app_urls, "() => { throw new Error('canvas blocked'); }"
+    )
+
+    _try_to_start(page, "Throws")
+    page.wait_for_timeout(500)
+
+    assert reports == [{"kind": "canvas_creation", "reason": "exception"}]

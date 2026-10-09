@@ -294,6 +294,7 @@ emits five game metrics (`backend/app/game_metrics.py`):
 | `scores.rejected` | rejected submissions, labelled `reason` = `player_name` / `score` / `malformed` |
 | `leaderboard.reads` | leaderboard requests |
 | `leaderboard.new_top_score` | scores that beat every earlier score (a tie doesn't count) |
+| `client.canvas_creation_failures` | page loads whose game canvas couldn't start, labelled `reason` = `no_2d_context` / `exception` — reported by the browser via `POST /api/client-errors`, at most once per page load |
 
 Never label a metric by player name: on CloudWatch every distinct label
 combination is a separately billed metric.

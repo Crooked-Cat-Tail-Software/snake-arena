@@ -106,6 +106,37 @@ paths:
               schema:
                 $ref: "#/components/schemas/ValidationError"
 
+  /api/client-errors:
+    post:
+      operationId: reportClientError
+      summary: Report a failure that happened in the player's browser
+      description: >
+        Called by the frontend when something fails client-side that the
+        server would otherwise never see -- currently only the game canvas
+        failing to start. At most once per page load. Nothing is stored;
+        the report increments a monitoring metric (labelled with the
+        reason) that an alarm watches. Both fields are closed enums so
+        reports can't carry free text or create unbounded metric labels.
+      tags: [client-errors]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientErrorReport"
+            example:
+              kind: canvas_creation
+              reason: no_2d_context
+      responses:
+        "204":
+          description: Report accepted (no body)
+        "422":
+          description: Unknown kind or reason, or missing fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+
 components:
   schemas:
     HealthStatus:
@@ -146,6 +177,23 @@ components:
           type: string
           format: date-time
           description: Server-assigned UTC timestamp.
+
+    ClientErrorReport:
+      type: object
+      required: [kind, reason]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [canvas_creation]
+          description: What failed. canvas_creation = the game board couldn't start.
+        reason:
+          type: string
+          enum: [no_2d_context, exception]
+          description: >
+            no_2d_context = the browser returned no 2D drawing context for the
+            canvas (e.g. hardware acceleration off, canvas blocked by an
+            extension); exception = creating or starting the game threw.
 
     ValidationError:
       type: object

@@ -36,6 +36,14 @@ class GameMetrics:
             unit="{read}",
             description="Leaderboard requests.",
         )
+        self._canvas_failures = meter.create_counter(
+            "client.canvas_creation_failures",
+            unit="{failure}",
+            description=(
+                "Page loads where the game canvas couldn't start (reported by "
+                "the browser, at most once per page load), by reason."
+            ),
+        )
         self._new_top_score = meter.create_counter(
             "leaderboard.new_top_score",
             unit="{score}",
@@ -55,3 +63,7 @@ class GameMetrics:
 
     def record_leaderboard_read(self) -> None:
         self._leaderboard_reads.add(1)
+
+    def record_canvas_failure(self, reason: str) -> None:
+        # reason is already validated against a closed enum (schemas.py).
+        self._canvas_failures.add(1, {"reason": reason})

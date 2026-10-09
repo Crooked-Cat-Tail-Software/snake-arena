@@ -5,10 +5,21 @@ const GRID_SIZE = 20;
 const CELL_PX = 20;
 const TICK_MS = 120;
 
+// Thrown when the browser gives the canvas no 2D drawing context (e.g.
+// hardware acceleration off, or an extension blocking canvas). Without
+// this check the game would only fail later, on its first draw.
+export class CanvasUnavailableError extends Error {
+  constructor() {
+    super("This browser couldn't provide a 2D drawing context for the game canvas.");
+    this.name = "CanvasUnavailableError";
+  }
+}
+
 export class SnakeGame {
   constructor(canvas, { onScoreChange, onGameOver } = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
+    if (!this.ctx) throw new CanvasUnavailableError();
     this.onScoreChange = onScoreChange || (() => {});
     this.onGameOver = onGameOver || (() => {});
     this._timer = null;

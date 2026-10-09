@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, Query, Request
+from fastapi import FastAPI, Depends, Query, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +81,14 @@ def read_leaderboard(
 ):
     request.app.state.game_metrics.record_leaderboard_read()
     return crud.get_top_scores(db, limit=limit)
+
+
+@app.post("/api/client-errors", status_code=204, tags=["client-errors"])
+def report_client_error(report: schemas.ClientErrorReport, request: Request):
+    """A failure in the player's browser (see openapi.yaml). Counted for
+    alerting, never stored."""
+    request.app.state.game_metrics.record_canvas_failure(report.reason)
+    return Response(status_code=204)
 
 
 # Serve the built frontend, if present. In local dev the frontend is

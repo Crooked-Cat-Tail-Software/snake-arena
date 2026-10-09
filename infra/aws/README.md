@@ -82,8 +82,17 @@ can only write traces and write to that log group.
   combination is billed.
 - **Alarms** (in each app stack, since they watch that app's load
   balancer and ECS service): `<project>-5xx-errors` (5+ server errors from
-  the app or load balancer in 5 minutes) and `<project>-memory-high` (task
-  memory above 80% for 15 minutes).
+  the app or load balancer in 5 minutes), `<project>-memory-high` (task
+  memory above 80% for 15 minutes), and
+  `<project>-canvas-creation-failures` — players can't start the game: 3+
+  page loads whose game canvas failed to start within 10 minutes. One
+  failure is usually one player's browser; three means several real
+  players are locked out. It watches only the version the stack is
+  running, and its text (also in the notification email) carries the
+  service, environment, version, owner (`AlertOwner`, default
+  `dbrown77`), dashboard link and runbook; the same fields are tags on
+  the alarm. The report endpoint is public, so a burst of fake reports
+  can trip it — the runbook says how to check.
 - **Traces:** X-Ray → Traces in `us-east-2`, or pick an environment's
   group. Filter one release with `annotation.service_version = "<image
   tag>"`. (Environment and version are searchable because the app copies

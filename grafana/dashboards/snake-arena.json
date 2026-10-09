@@ -731,6 +731,77 @@
         "overrides": []
       },
       "id": 8
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Canvas creation failures (players who couldn't start a game)",
+      "description": "Page loads whose game canvas couldn't start, by reason. Alarm: 3+ in 10 minutes.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "SnakeArena",
+          "metricName": "client.canvas_creation_failures",
+          "region": "default",
+          "dimensions": {
+            "deployment.environment.name": "$env",
+            "service.version": "$version",
+            "reason": "*"
+          },
+          "matchExact": true,
+          "statistic": "Sum",
+          "period": "",
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.reason')} (${PROP('Dim.service.version')})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }

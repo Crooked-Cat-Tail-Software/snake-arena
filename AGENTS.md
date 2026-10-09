@@ -175,6 +175,10 @@ CloudWatch dashboard's SEARCH expressions in
 (`snake-arena-observability`) owns the metrics log group, alarm topic,
 dashboard and X-Ray groups; app stacks only import from it -- never make
 it import from an app stack, or dev could no longer be torn down. The
+frontend reports canvas start failures to `POST /api/client-errors`
+(closed enums only, once per page load); the alarm on them watches the
+running version (taken from `ImageUri`'s tag) -- keep its description
+under CloudWatch's 1,024-character limit. The
 ADOT collector image has no `transform` processor (it fails to start
 with one); per-span attribute changes go in the app
 (`telemetry.py`'s `ResourceAttributesOnSpans`). Any new IAM role in `02-app.yaml` must also be added

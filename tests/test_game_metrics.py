@@ -95,3 +95,33 @@ def test_bad_leaderboard_query_is_not_a_rejected_score(client, game_metrics):
     assert client.get("/api/scores?limit=0").status_code == 422
 
     assert "scores.rejected" not in _points(game_metrics)
+
+
+@pytest.mark.parametrize("reason", ["no_2d_context", "exception"])
+def test_canvas_failure_report_counted_by_reason(client, game_metrics, reason):
+    response = client.post(
+        "/api/client-errors", json={"kind": "canvas_creation", "reason": reason}
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    [point] = _points(game_metrics)["client.canvas_creation_failures"]
+    assert (point.value, dict(point.attributes)) == (1, {"reason": reason})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "canvas_creation", "reason": "made_up"},
+        {"kind": "something_else", "reason": "exception"},
+        {"kind": "canvas_creation"},
+        {"kind": "canvas_creation", "reason": "exception", "detail": "free text"},
+    ],
+)
+def test_invalid_client_error_report_rejected_and_not_counted(client, game_metrics, body):
+    assert client.post("/api/client-errors", json=body).status_code == 422
+
+    points = _points(game_metrics)
+    assert "client.canvas_creation_failures" not in points
+    # Not a score submission either.
+    assert "scores.rejected" not in points

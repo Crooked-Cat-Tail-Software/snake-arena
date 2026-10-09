@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, field_serializer, ConfigDict
 
@@ -35,3 +36,13 @@ class Score(BaseModel):
         # Stored as naive UTC; present it as an explicit UTC ISO-8601 string
         # to match the "Z"-suffixed examples in openapi.yaml.
         return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class ClientErrorReport(BaseModel):
+    """POST /api/client-errors body. Closed enums (see openapi.yaml), so a
+    report can't carry free text or create unbounded metric labels."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["canvas_creation"]
+    reason: Literal["no_2d_context", "exception"]

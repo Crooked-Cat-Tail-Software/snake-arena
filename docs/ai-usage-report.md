@@ -1292,3 +1292,51 @@ requests were sent to prod.
 **Not verified:** the dashboard's dropdowns in the console (the browser
 pane isn't signed in to AWS, and Claude doesn't enter sign-in
 credentials); alarm emails (none configured).
+
+## Stage 20 — Actionable alert for repeated canvas-creation failures
+
+**Asked:** an actionable alert for repeated canvas component-creation
+failures, with a threshold and duration that represent real user impact,
+including service, environment, deployed version, owner and dashboard URL.
+
+**Found first:** the only canvas component is the game board
+(`new SnakeGame(canvas)` in `App.jsx`). `getContext("2d")` can return
+`null`; nothing checked it or caught errors, so players got a blank board
+and the backend never heard about it — no signal existed to alert on.
+The human chose the owner (`dbrown77`) and alert email
+(donna.brown05@gmail.com, kept out of the repo — passed as `ALARM_EMAIL`).
+
+**Generated/changed (contract first):**
+- `openapi.yaml`, `product-spec.md` (§5.5, §7): `POST /api/client-errors`
+  `{kind: canvas_creation, reason: no_2d_context | exception}` → 204;
+  closed enums, no extra fields, nothing stored.
+- Frontend: `game.js` throws `CanvasUnavailableError` when there's no 2D
+  context; `App.jsx` catches create/start failures, shows a message with
+  a Back button instead of a blank board, and reports once per page load;
+  `api.js` `reportClientError` is fire-and-forget (never throws).
+- Backend: `ClientErrorReport` schema, endpoint, metric
+  `client.canvas_creation_failures` (label `reason`).
+- `02-app.yaml`: collector publishes it with environment + version +
+  reason; `CanvasCreationFailuresAlarm` — ≥ 3 in one 10-minute period for
+  this environment and the running version (from `ImageUri`), notifies
+  the shared topic; description (821 chars rendered, limit 1,024) with
+  service, environment, version, owner, dashboard URL and a 4-step
+  runbook; same fields as tags. New `AlertOwner` parameter.
+- `01-observability.yaml`: exports `DashboardUrl`; dashboard gains a
+  canvas-failures chart and both environments' new alarms. Grafana
+  dashboard gains the same chart.
+- Tests: 6 backend (204 + counted by reason; invalid kind/reason/missing/
+  extra field → 422, not counted, not a rejected score) and 2 browser
+  tests (no 2D context → message, exactly one report across a retry;
+  throwing getContext → reason `exception`).
+
+**Threshold reasoning:** one report is usually one player's browser or
+extension; reports are deduplicated per page load, so 3 in 10 minutes
+means several separate page loads — real players — couldn't play. At
+this game's traffic that's an outage. Known risk, in the runbook: the
+endpoint is public, so fake reports can cause a false alarm (but not
+cost or data pollution — closed enums).
+
+**Verified so far:** 35/35 tests; `cfn-lint` clean; the real collector
+(stdout mode) published the metric with exactly the alarm's dimensions
+and correct counts.
