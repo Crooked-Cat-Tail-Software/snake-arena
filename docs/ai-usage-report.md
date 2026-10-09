@@ -1351,6 +1351,6 @@ the API (all five fields present). Test fire: 3 reports to dev at
 prod (healthy; prod alarm reads environment=prod and the same version;
 RDS untouched). Prod alarm not test-fired.
 
-**Not verified by Claude:** that the notification emails actually reached
-the inbox and read well (SNS reported successful delivery to the topic;
-the human was asked to check).
+**Confirmed by the human:** both the ALARM and the OK notification
+emails arrived — the full path (browser report → metric → alarm → email
+→ reset) works end to end.
